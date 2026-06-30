@@ -117,7 +117,14 @@ MainLayout {
     // visual grid pageSize and produced half-loaded pages on every
     // subsequent cursor advance.
     readonly property int _gamesListFetchSize: 30
-    readonly property var _gamesGridShape: Sizing.gamesGridShape(Sizing.screenWidth, Sizing.screenHeight)
+    readonly property var _gamesGridProfile: BrowseLayouts.themeProfile(BrowseLayouts.currentThemeId, "gamesGrid")
+    readonly property var _gamesGridStatusProfile: root._gamesGridProfile && root._gamesGridProfile.status ? root._gamesGridProfile.status : null
+    readonly property var _gamesGridFooterProfile: root._gamesGridProfile && root._gamesGridProfile.footer ? root._gamesGridProfile.footer : null
+    readonly property int _gamesGridTopStripBottom: Sizing.headerBottom + (root._gamesGridStatusProfile ? root._gamesGridStatusProfile.topMargin : Sizing.pctH(1)) + (root._gamesGridStatusProfile ? root._gamesGridStatusProfile.stripHeight : Sizing.pctH(7))
+    readonly property int _gamesGridBottomMargin: root._gamesGridFooterProfile ? root._gamesGridFooterProfile.gridBottomMargin : (Sizing.pctH(8) + Sizing.pctH(7))
+    readonly property int _gamesGridViewportWidth: Math.max(1, Sizing.screenWidth)
+    readonly property int _gamesGridViewportHeight: Math.max(1, Sizing.screenHeight - root._gamesGridTopStripBottom - root._gamesGridBottomMargin)
+    readonly property var _gamesGridShape: Sizing.gamesGridShape(root._gamesGridViewportWidth, root._gamesGridViewportHeight)
     readonly property int _gamesGridColumns: root._gamesGridShape.columns
     readonly property int _gamesGridRows: root._gamesGridShape.rows
     readonly property int _gamesPageSize: Browse.Settings.current_browse_layout === "list" ? root._gamesListFetchSize : root._gamesGridColumns * root._gamesGridRows
@@ -125,16 +132,18 @@ MainLayout {
         if (root.gamesScreenRequested || root.activeScreen === root.screenGames)
             root._syncGamesModelLayout();
     }
-    // Maximum cover dimension requested from Core. Computed from the tile
-    // pixel size with 2x headroom so the resized image looks sharp even
-    // when the grid zooms slightly. Core fits the image within a
-    // maxSize x maxSize box before returning it, so the cache holds far
-    // more covers at the same byte cap.
-    readonly property int _gamesCoverMaxSize: {
-        const tileW = Math.ceil(Sizing.screenWidth / Math.max(1, root._gamesGridColumns));
-        const tileH = Math.ceil(Sizing.screenHeight / Math.max(1, root._gamesGridRows));
-        return Math.max(tileW, tileH) * 2;
-    }
+    // Cover size requested from Core for grid tiles. Same per-view, snapped tier
+    // (128/256/512/768) the grid tile decodes at (Tile.qml drives sourceSize off
+    // the identical helper), so the request matches what is shown and Core caches
+    // one resized WebP per tier, keeping the constantly-browsed grid small in RAM.
+    readonly property int _gamesCoverMaxSize: Sizing.gamesGridCoverSourceSize(root._gamesGridViewportWidth, root._gamesGridViewportHeight)
+    // The detail pane shows the cover larger than a grid tile, so it requests its
+    // own snapped tier (a step above the grid). Baked into the detail keys, this
+    // gives the pane an independent, crisper cache entry instead of sharing the
+    // grid's smaller image.
+    readonly property int _gamesDetailCoverMaxSize: Sizing.detailCoverSourceSize(root._gamesGridViewportWidth, root._gamesGridViewportHeight)
+    // _gamesDetailCoverMaxSize derives from _gamesCoverMaxSize, so this one
+    // handler re-syncs both sizes whenever the grid shape changes.
     on_GamesCoverMaxSizeChanged: {
         if (root.gamesScreenRequested || root.activeScreen === root.screenGames)
             root._syncGamesModelLayout();
@@ -176,6 +185,7 @@ MainLayout {
     function _syncGamesModelLayout(): void {
         Browse.GamesModel.page_size = root._gamesPageSize;
         Browse.GamesModel.set_cover_max_size(root._gamesCoverMaxSize);
+        Browse.GamesModel.set_detail_cover_max_size(root._gamesDetailCoverMaxSize);
     }
 
     function _screenItem(screen: string): var {
