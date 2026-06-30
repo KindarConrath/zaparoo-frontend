@@ -443,8 +443,8 @@ Euskara - devilschile2</source>
 <context>
     <name>GamesScreen</name>
     <message>
-        <location filename="../screens/GamesScreen.qml" line="131"/>
-        <location filename="../screens/GamesScreen.qml" line="171"/>
+        <location filename="../screens/GamesScreen.qml" line="137"/>
+        <location filename="../screens/GamesScreen.qml" line="177"/>
         <source>%1 files</source>
         <translation>%1 αρχεία</translation>
     </message>
@@ -454,8 +454,8 @@ Euskara - devilschile2</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../screens/GamesScreen.qml" line="140"/>
-        <location filename="../screens/GamesScreen.qml" line="172"/>
+        <location filename="../screens/GamesScreen.qml" line="146"/>
+        <location filename="../screens/GamesScreen.qml" line="178"/>
         <source>%1 / %2</source>
         <translation type="unfinished"></translation>
     </message>
@@ -465,7 +465,7 @@ Euskara - devilschile2</source>
         <translation>Φόρτωση παιχνιδιών…</translation>
     </message>
     <message>
-        <location filename="../screens/GamesScreen.qml" line="136"/>
+        <location filename="../screens/GamesScreen.qml" line="142"/>
         <source>Loading more…</source>
         <translation>Φόρτωση περισσότερων…</translation>
     </message>

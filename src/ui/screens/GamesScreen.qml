@@ -88,6 +88,11 @@ MediaListScreen {
             Browse.GamesModel.set_system(sid);
     }
     acceptAction: index => {
+        // Debounce the whole accept path: while a prior Accept's deferred
+        // leg is still pending, ignore repeats so neither the folder nor the
+        // launch branch re-fires the cue or reassigns the pending target.
+        if (pressCommit.running)
+            return;
         const entryType = Browse.GamesModel.entry_type_at(index);
         if ((entryType === "directory" || entryType === "root") && !Browse.GamesModel.is_media_capable_at(index)) {
             // Persist synchronously (MiSTer may be killed at any time), then
@@ -99,12 +104,13 @@ MediaListScreen {
             pressCommit.arm();
             return;
         }
-        // State persistence is synchronous; launch_at is deferred so the
-        // push-in cue plays on a fully static scene before Core takes the
-        // FPGA. Launch shares the same push-in as forward navigation.
+        // Launch is dispatched immediately so the run command races the
+        // push-in cue rather than waiting it out; the deferred leg only
+        // settles the tile back to rest. State persistence is synchronous.
         games._scheduleSelectedPersist(Browse.GamesModel.path_at(index));
         games.flushSelectedPersist();
         games.pulseActivate();
+        Browse.GamesModel.launch_at(index);
         pressCommit._launchIndex = index;
         pressCommit.arm();
     }
@@ -215,9 +221,7 @@ MediaListScreen {
                 _folderPath = "";
                 games.requestNavigateIntoFolder(p);
             } else if (_launchIndex >= 0) {
-                const idx = _launchIndex;
                 _launchIndex = -1;
-                Browse.GamesModel.launch_at(idx);
                 // Settle the push-in back to rest. Invisible when the launch
                 // takes the FPGA or kills us; prevents a stuck pushed-in tile
                 // when the launcher stays on the page (e.g. an Audio track).
