@@ -56,6 +56,7 @@ TestCase {
         // next test if we didn't reset it here.
         main._stopRepeat();
         main._resetRapidNavigation();
+        Browse.Settings.set_favorites_grouped(true);
     }
 
     function cleanup(): void {
@@ -126,6 +127,22 @@ TestCase {
         // qmllint enable compiler
         main.handleKey(Qt.Key_Return);
         compare(main.activeScreen, main.updateEnabled ? main.screenUpdate : main.screenSettings);
+    }
+
+    function test_hub_favorites_action_uses_favorite_systems_mode(): void {
+        Browse.Settings.set_favorites_grouped(true);
+        main.hubScreen.currentRow = 1;
+        main.hubScreen.currentIndex = main.hubScreen._actionIndexForId("favorites");
+        main.handleKey(Qt.Key_Return);
+        compare(main.pendingTransition, "favoriteSystems");
+    }
+
+    function test_hub_favorites_action_uses_all_favorites_mode(): void {
+        Browse.Settings.set_favorites_grouped(false);
+        main.hubScreen.currentRow = 1;
+        main.hubScreen.currentIndex = main.hubScreen._actionIndexForId("favorites");
+        main.handleKey(Qt.Key_Return);
+        compare(main.pendingTransition, "favorites");
     }
 
     // Enter on an empty systems screen retries the current load (the
@@ -582,17 +599,22 @@ TestCase {
     }
 
     function test_context_menu_favorites_matches_games_media_entries(): void {
-        const entries = main.buildContextMenuEntries("favorites", "", true, true, true, "");
-        compare(_idsOf(entries), ["toggle_favorite", "write_card", "qr_code", "launch_game"]);
+        const entries = main.buildContextMenuEntries("favorites", "", true, true, true, "", false, "");
+        compare(_idsOf(entries), ["toggle_favorite", "write_card", "qr_code", "launch_game", "switch_to_favorite_systems"]);
     }
 
     function test_context_menu_favorites_no_reader_omits_write_card(): void {
-        const entries = main.buildContextMenuEntries("favorites", "", true, false, true, "");
-        compare(_idsOf(entries), ["toggle_favorite", "qr_code", "launch_game"]);
+        const entries = main.buildContextMenuEntries("favorites", "", true, false, true, "", false, "");
+        compare(_idsOf(entries), ["toggle_favorite", "qr_code", "launch_game", "switch_to_favorite_systems"]);
+    }
+
+    function test_context_menu_favorite_systems_owner_includes_mode_switch(): void {
+        const entries = main.buildContextMenuEntries("favoritesystems", "", false, false, false, "", false, "");
+        compare(_idsOf(entries), ["switch_to_favorites"]);
     }
 
     function test_context_menu_recents_omits_more_info(): void {
-        const entries = main.buildContextMenuEntries("recents", "", false, false, false, "");
+        const entries = main.buildContextMenuEntries("recents", "", false, false, false, "", false, "");
         compare(_idsOf(entries), ["launch_game"]);
     }
 

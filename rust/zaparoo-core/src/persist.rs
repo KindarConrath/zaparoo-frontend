@@ -29,6 +29,7 @@ pub struct PersistedState {
     pub systems: SystemsState,
     pub games: GamesState,
     pub favorites: FavoritesState,
+    pub favorite_systems: FavoriteSystemsState,
     pub recents: RecentsState,
     pub settings: SettingsState,
 }
@@ -87,6 +88,14 @@ pub struct FavoritesState {
     pub selected_path: String,
 }
 
+/// Favorite-systems selection state. Mirrors `FavoritesState` but stays
+/// separate so the favorite-systems screen can resume independently.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FavoriteSystemsState {
+    pub selected_path: String,
+}
+
 /// Per-frontend Settings selections. `resolution` is `"WxH"` (e.g.
 /// `"1920x1080"`); empty means "no Settings override" and the value
 /// from `[mister.video_*]` in `frontend.toml` is left in place.
@@ -109,6 +118,11 @@ pub struct SettingsState {
     pub orientation: String,
     #[serde(default = "default_browse_layout")]
     pub browse_layout: String,
+    #[serde(
+        default = "default_favorites_grouped",
+        deserialize_with = "deserialize_favorites_grouped"
+    )]
+    pub favorites_grouped: bool,
     #[serde(default = "default_system_logo_style")]
     pub system_logo_style: String,
     #[serde(default = "default_button_layout")]
@@ -161,6 +175,7 @@ impl Default for SettingsState {
             clock_format: default_clock_format(),
             orientation: default_orientation(),
             browse_layout: default_browse_layout(),
+            favorites_grouped: default_favorites_grouped(),
             system_logo_style: default_system_logo_style(),
             button_layout: default_button_layout(),
             mouse_enabled: default_mouse_enabled(),
@@ -197,6 +212,28 @@ fn default_orientation() -> String {
 
 fn default_browse_layout() -> String {
     "grid".into()
+}
+
+fn default_favorites_grouped() -> bool {
+    true
+}
+
+fn deserialize_favorites_grouped<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FavoritesGroupedField {
+        Bool(bool),
+        String(String),
+    }
+
+    let field = FavoritesGroupedField::deserialize(deserializer)?;
+    Ok(match field {
+        FavoritesGroupedField::Bool(value) => value,
+        FavoritesGroupedField::String(value) => value.trim() != "favorites",
+    })
 }
 
 fn default_system_logo_style() -> String {
@@ -306,8 +343,8 @@ mod tests {
     )]
 
     use super::{
-        load_from, save_to, FavoritesState, GamesState, HubState, PersistedState, RecentsState,
-        SettingsState, SystemsState,
+        load_from, save_to, FavoriteSystemsState, FavoritesState, GamesState, HubState,
+        PersistedState, RecentsState, SettingsState, SystemsState,
     };
     use std::thread;
 
@@ -344,12 +381,16 @@ mod tests {
             favorites: FavoritesState {
                 selected_path: "/roms/nes/zelda.nes".into(),
             },
+            favorite_systems: FavoriteSystemsState {
+                selected_path: "NES".into(),
+            },
             settings: SettingsState {
                 resolution: "1920x1080".into(),
                 language: "it_IT".into(),
                 clock_format: "24h".into(),
                 orientation: "cw".into(),
                 browse_layout: "list".into(),
+                favorites_grouped: true,
                 system_logo_style: "color".into(),
                 button_layout: "b".into(),
                 mouse_enabled: false,
@@ -435,6 +476,7 @@ resolution = "1920x1080"
                                 selected_at_level: vec![format!("/roms/{i}/{j}.rom")],
                             },
                             favorites: FavoritesState::default(),
+                            favorite_systems: FavoriteSystemsState::default(),
                             recents: RecentsState::default(),
                             settings: SettingsState::default(),
                         };

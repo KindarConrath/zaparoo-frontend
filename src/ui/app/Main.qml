@@ -174,6 +174,8 @@ MainLayout {
             root._syncGamesModelLayout();
         } else if (screen === root.screenFavorites)
             root.favoritesScreenRequested = true;
+        else if (screen === root.screenFavoriteSystems)
+            root.favoriteSystemsScreenRequested = true;
         else if (screen === root.screenRecents)
             root.recentsScreenRequested = true;
         else if (screen === root.screenSettings)
@@ -195,6 +197,8 @@ MainLayout {
             return root.gamesScreen;
         if (screen === root.screenFavorites)
             return root.favoritesScreen;
+        if (screen === root.screenFavoriteSystems)
+            return root.favoriteSystemsScreen;
         if (screen === root.screenRecents)
             return root.recentsScreen;
         if (screen === root.screenSettings)
@@ -529,6 +533,7 @@ MainLayout {
     property var _categoryReadyCallback: null
     property var _systemReadyCallback: null
     property var _favoritesReadyCallback: null
+    property var _favoriteSystemsReadyCallback: null
     property var _recentsReadyCallback: null
     property string _catalogWaitCategory: ""
     // Set when `_ensureCategory` arms `deferredCategorySetTimer` and
@@ -543,6 +548,7 @@ MainLayout {
     readonly property bool _systemsModelConnectionsEnabled: root.systemsScreenRequested || (root._firstFrameSeen && root._startupRestorePending) || root._categoryReadyCallback !== null || root._deferredCategoryPending || root._catalogWaitCategory !== ""
     readonly property bool _gamesModelConnectionsEnabled: root.gamesScreenRequested || root._systemReadyCallback !== null || root._deferredSystemPending
     readonly property bool _favoritesModelConnectionsEnabled: root.favoritesScreenRequested || root._favoritesReadyCallback !== null
+    readonly property bool _favoriteSystemsModelConnectionsEnabled: root.favoriteSystemsScreenRequested || root._favoriteSystemsReadyCallback !== null
     readonly property bool _recentsModelConnectionsEnabled: root.recentsScreenRequested || root._recentsReadyCallback !== null || root._pendingResumeLaunch
     // Saved games-screen entry path that wasn't on the freshly seeded
     // page 1 of MediaBrowse. The GamesModel.onCountChanged watcher
@@ -621,6 +627,8 @@ MainLayout {
         }
         if (root.pendingTransition === "favorites")
             favoritesTransitionTimer.restart();
+        else if (root.pendingTransition === "favoriteSystems")
+            favoriteSystemsTransitionTimer.restart();
         else if (root.pendingTransition === "recents")
             recentsTransitionTimer.restart();
         else if (root.pendingTransition === "settings")
@@ -716,6 +724,21 @@ MainLayout {
                 return;
             }
             root._favoritesReadyCallback = null;
+            cb();
+            root._maybeCompleteBackTransition();
+        }
+    }
+    Connections {
+        target: root._favoriteSystemsModelConnectionsEnabled ? Browse.FavoriteSystemsModel : null
+        function onLoadingChanged(): void {
+            if (Browse.FavoriteSystemsModel.loading)
+                return;
+            const cb = root._favoriteSystemsReadyCallback;
+            if (cb === null) {
+                root._maybeCompleteBackTransition();
+                return;
+            }
+            root._favoriteSystemsReadyCallback = null;
             cb();
             root._maybeCompleteBackTransition();
         }
@@ -878,6 +901,13 @@ MainLayout {
         root._completeTransition(root.screenFavorites);
     }
 
+    function _completeFavoriteSystemsTransition(): void {
+        if (root.pendingTransition !== "favoriteSystems")
+            return;
+        root.favoriteSystemsScreen.restoreSelection();
+        root._completeTransition(root.screenFavoriteSystems);
+    }
+
     function _startFavoritesTransitionLoad(): void {
         if (root.pendingTransition !== "favorites")
             return;
@@ -895,9 +925,30 @@ MainLayout {
         });
     }
 
+    function _startFavoriteSystemsTransitionLoad(): void {
+        if (root.pendingTransition !== "favoriteSystems")
+            return;
+        root._whenScreenReady(root.screenFavoriteSystems, function () {
+            if (root.pendingTransition !== "favoriteSystems")
+                return;
+            if (root._catalogStillBooting())
+                return;
+            if (!Browse.FavoriteSystemsModel.loading) {
+                root._completeFavoriteSystemsTransition();
+                return;
+            }
+            root._favoriteSystemsReadyCallback = root._completeFavoriteSystemsTransition;
+        });
+    }
+
     function _navigateToFavorites(): void {
         root.pendingTransition = "favorites";
         favoritesTransitionTimer.restart();
+    }
+
+    function _navigateToFavoriteSystems(): void {
+        root.pendingTransition = "favoriteSystems";
+        favoriteSystemsTransitionTimer.restart();
     }
 
     function _completeRecentsTransition(): void {
@@ -1317,7 +1368,11 @@ MainLayout {
         function onRequestQuit(): void {
             root.openQuitConfirmModal();
         }
+        function onRequestFavoriteSystemsScreen(): void {
+            root._navigateToFavoriteSystems();
+        }
         function onRequestFavoritesScreen(): void {
+            root.favoritesScreenSystemId = "";
             root._navigateToFavorites();
         }
         function onRequestRecentsScreen(): void {
@@ -1338,8 +1393,30 @@ MainLayout {
         function onRequestHubScreen(): void {
             root._navigateBackToScreen(root.screenHub);
         }
+        function onRequestFavoriteSystemsScreen(): void {
+            root._navigateToFavoriteSystems();
+        }
         function onRequestContextMenu(index: int, anchorRect): void {
             root.openContextMenu("favorites", index, anchorRect);
+        }
+        function onRequestPageMenu(): void {
+            root.openPageMenu();
+        }
+    }
+    Connections {
+        target: root.favoriteSystemsScreen
+        function onRequestHubScreen(): void {
+            root._navigateBackToScreen(root.screenHub);
+        }
+        function onRequestFavoritesScreenForSystem(systemId: string): void {
+            root.favoritesScreenSystemId = systemId;
+            root._navigateToFavorites();
+        }
+        function onRequestContextMenu(index: int, anchorRect): void {
+            root.openContextMenu("favoritesystems", index, anchorRect);
+        }
+        function onRequestPageMenu(): void {
+            root.openPageMenu();
         }
     }
     Connections {
@@ -1683,6 +1760,9 @@ MainLayout {
                 return;
             mediaCapable = true;
             isFavorite = Browse.FavoritesModel.is_favorite_at(index);
+        } else if (owner === "favoritesystems") {
+            if (index >= Browse.FavoriteSystemsModel.count)
+                return;
         } else if (owner === "recents") {
             if (index >= Browse.RecentsModel.count)
                 return;
@@ -1828,6 +1908,13 @@ MainLayout {
                 Browse.GamesModel.toggle_favorite_at(targetIndex);
             else if (owner === "favorites")
                 Browse.FavoritesModel.toggle_favorite_at(targetIndex);
+        } else if (id === "switch_to_favorites") {
+            Browse.Settings.set_favorites_grouped(false);
+            root.favoritesScreenSystemId = "";
+            root._navigateToFavorites();
+        } else if (id === "switch_to_favorite_systems") {
+            Browse.Settings.set_favorites_grouped(true);
+            root._navigateToFavoriteSystems();
         } else if (id === "more_info") {
             root.openGameInfo(owner, targetIndex);
         } else if (id === "write_card") {
@@ -2106,14 +2193,37 @@ MainLayout {
     // The facet fetch is kicked off here so the buckets are likely ready by the
     // time the user advances into the grid.
     function openPageMenu(): void {
-        Browse.GamesModel.load_letter_index();
-        const entries = [
-            {
-                "id": "jump_letter",
-                "label": qsTr("Go to...")
+        let entries = [];
+        let initialId = "";
+        if (root.activeScreen === root.screenGames) {
+            Browse.GamesModel.load_letter_index();
+            entries = [
+                {
+                    "id": "jump_letter",
+                    "label": qsTr("Go to...")
+                }
+            ];
+            initialId = "jump_letter";
+        } else if (root.activeScreen === root.screenFavorites || root.activeScreen === root.screenFavoriteSystems) {
+            if (Browse.Settings.favorites_grouped) {
+                entries = [
+                    {
+                        "id": "switch_to_favorites",
+                        "label": qsTr("All Favorites")
+                    }
+                ];
+            } else {
+                entries = [
+                    {
+                        "id": "switch_to_favorite_systems",
+                        "label": qsTr("Group By Console")
+                    }
+                ];
             }
-        ];
-        root.openListPickerModal(qsTr("View"), entries, "jump_letter", "page_menu");
+        }
+        if (entries.length === 0)
+            return;
+        root.openListPickerModal(qsTr("View"), entries, initialId, "page_menu");
     }
 
     // Re-parse the model's facet JSON into the live grid entries. Bound through
@@ -2303,6 +2413,14 @@ MainLayout {
             root.closeListPickerModal();
             if (selectedId === "jump_letter")
                 root.openLetterJumpModal();
+            else if (selectedId === "switch_to_favorites") {
+                Browse.Settings.set_favorites_grouped(false);
+                root.favoritesScreenSystemId = "";
+                root._navigateToFavorites();
+            } else if (selectedId === "switch_to_favorite_systems") {
+                Browse.Settings.set_favorites_grouped(true);
+                root._navigateToFavoriteSystems();
+            }
             return;
         }
         if (fieldId === "system_launcher_pending")
@@ -2589,6 +2707,9 @@ MainLayout {
         } else if (root.activeScreen === root.screenFavorites) {
             if (root.favoritesScreen !== null)
                 root.favoritesScreen.handleAction(action);
+        } else if (root.activeScreen === root.screenFavoriteSystems) {
+            if (root.favoriteSystemsScreen !== null)
+                root.favoriteSystemsScreen.handleAction(action);
         } else if (root.activeScreen === root.screenRecents) {
             if (root.recentsScreen !== null)
                 root.recentsScreen.handleAction(action);
@@ -3140,6 +3261,13 @@ MainLayout {
         interval: 50
         repeat: false
         onTriggered: root._startFavoritesTransitionLoad()
+    }
+
+    Timer {
+        id: favoriteSystemsTransitionTimer
+        interval: 50
+        repeat: false
+        onTriggered: root._startFavoriteSystemsTransitionLoad()
     }
 
     Timer {

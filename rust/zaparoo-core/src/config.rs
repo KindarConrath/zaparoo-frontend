@@ -65,6 +65,7 @@ pub struct SettingsConfig {
     pub discover_arcade_alternate_versions: Option<bool>,
     pub screensaver_timeout: Option<String>,
     pub media_image_type: Option<String>,
+    pub favorites_grouped: Option<bool>,
     pub show_hidden: Option<bool>,
     pub show_original_filenames: Option<bool>,
     pub hidden_categories: Vec<String>,
@@ -94,6 +95,7 @@ pub struct SettingsMirror<'a> {
     pub debug_logging: bool,
     pub screensaver_timeout: &'a str,
     pub media_image_type: &'a str,
+    pub favorites_grouped: bool,
     pub show_hidden: bool,
     pub show_original_filenames: bool,
     pub region: &'a str,
@@ -184,6 +186,8 @@ struct RawSettings {
     discover_arcade_alternate_versions: Option<bool>,
     screensaver_timeout: Option<String>,
     media_image_type: Option<String>,
+    favorites_grouped: Option<bool>,
+    favorites_entry_mode: Option<String>,
     show_hidden: Option<bool>,
     show_original_filenames: Option<bool>,
     #[serde(default)]
@@ -323,6 +327,12 @@ fn settings_config_from_raw(raw: RawSettings) -> SettingsConfig {
         discover_arcade_alternate_versions: raw.discover_arcade_alternate_versions,
         screensaver_timeout: trim_opt(raw.screensaver_timeout),
         media_image_type: trim_opt(raw.media_image_type),
+        favorites_grouped: raw.favorites_grouped.or_else(|| {
+            raw.favorites_entry_mode.as_deref().map(|value| {
+                let trimmed = value.trim();
+                trimmed != "favorites"
+            })
+        }),
         show_hidden: raw.show_hidden,
         show_original_filenames: raw.show_original_filenames,
         hidden_categories: normalize_string_list(raw.hidden_categories),
@@ -413,6 +423,10 @@ pub fn save_settings_mirror(path: &Path, mirror: SettingsMirror<'_>) -> Result<(
     settings.insert(
         "media_image_type".into(),
         toml::Value::String(mirror.media_image_type.trim().to_string()),
+    );
+    settings.insert(
+        "favorites_grouped".into(),
+        toml::Value::Boolean(mirror.favorites_grouped),
     );
     settings.insert(
         "show_hidden".into(),
@@ -1027,6 +1041,7 @@ mod tests {
                 debug_logging: true,
                 screensaver_timeout: "300",
                 media_image_type: "auto",
+                favorites_grouped: true,
                 show_hidden: true,
                 show_original_filenames: true,
                 region: "us",
@@ -1081,6 +1096,7 @@ mod tests {
                 debug_logging: false,
                 screensaver_timeout: "60",
                 media_image_type: "auto",
+                favorites_grouped: true,
                 show_hidden: false,
                 show_original_filenames: false,
                 region: "auto",
@@ -1130,6 +1146,7 @@ mod tests {
                 debug_logging: true,
                 screensaver_timeout: "off",
                 media_image_type: "auto",
+                favorites_grouped: true,
                 show_hidden: false,
                 show_original_filenames: false,
                 region: "auto",

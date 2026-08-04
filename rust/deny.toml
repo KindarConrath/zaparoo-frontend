@@ -11,7 +11,12 @@ targets = [
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked  = "deny"
-ignore  = []
+ignore  = [
+    # cxx-qt 0.9 currently binds us to cxx 1.0.194; newer patched cxx releases
+    # introduce a bridge ABI/version skew in this workspace's generated C++ glue.
+    # Revisit when cxx-qt updates its compatible cxx floor.
+    "RUSTSEC-2026-0202",
+]
 
 [licenses]
 allow = [

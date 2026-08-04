@@ -191,6 +191,7 @@ pub struct SettingsRust {
     current_orientation: QString,
     available_browse_layouts: QStringList,
     current_browse_layout: QString,
+    favorites_grouped: bool,
     available_system_logo_styles: QStringList,
     current_system_logo_style: QString,
     available_button_layouts: QStringList,
@@ -233,6 +234,7 @@ pub mod ffi {
         #[qproperty(QString, current_orientation, READ, WRITE = set_orientation, NOTIFY)]
         #[qproperty(QStringList, available_browse_layouts, READ, CONSTANT)]
         #[qproperty(QString, current_browse_layout, READ, WRITE = set_browse_layout, NOTIFY)]
+        #[qproperty(bool, favorites_grouped, READ, WRITE = set_favorites_grouped, NOTIFY)]
         #[qproperty(QStringList, available_system_logo_styles, READ, CONSTANT)]
         #[qproperty(QString, current_system_logo_style, READ, WRITE = set_system_logo_style, NOTIFY)]
         #[qproperty(QStringList, available_button_layouts, READ, CONSTANT)]
@@ -265,6 +267,9 @@ pub mod ffi {
 
         #[qinvokable]
         fn set_browse_layout(self: Pin<&mut Settings>, value: QString);
+
+        #[qinvokable]
+        fn set_favorites_grouped(self: Pin<&mut Settings>, value: bool);
 
         #[qinvokable]
         fn set_system_logo_style(self: Pin<&mut Settings>, value: QString);
@@ -330,6 +335,7 @@ impl Initialize for ffi::Settings {
         self.as_mut().rust_mut().available_browse_layouts = browse_layouts();
         self.as_mut().rust_mut().current_browse_layout =
             QString::from(merged.browse_layout.as_str());
+        self.as_mut().rust_mut().favorites_grouped = merged.favorites_grouped;
         self.as_mut().rust_mut().available_system_logo_styles = system_logo_styles();
         self.as_mut().rust_mut().current_system_logo_style =
             QString::from(merged.system_logo_style.as_str());
@@ -431,6 +437,16 @@ impl ffi::Settings {
         mirror_settings_to_config(&config_file_path(), &snapshot.settings);
         self.as_mut().rust_mut().current_browse_layout = QString::from(value_str.as_str());
         self.as_mut().current_browse_layout_changed();
+    }
+
+    fn set_favorites_grouped(mut self: Pin<&mut Self>, value: bool) {
+        if self.favorites_grouped == value {
+            return;
+        }
+        let snapshot = persist_settings(|s| s.favorites_grouped = value);
+        mirror_settings_to_config(&config_file_path(), &snapshot.settings);
+        self.as_mut().rust_mut().favorites_grouped = value;
+        self.as_mut().favorites_grouped_changed();
     }
 
     #[allow(
@@ -611,6 +627,7 @@ pub(super) fn mirror_settings_to_config(config_path: &std::path::Path, settings:
             debug_logging: settings.debug_logging,
             screensaver_timeout: settings.screensaver_timeout.as_str(),
             media_image_type: settings.media_image_type.as_str(),
+            favorites_grouped: settings.favorites_grouped,
             show_hidden: settings.show_hidden,
             show_original_filenames: settings.show_original_filenames,
             region: settings.region.as_str(),
@@ -651,6 +668,11 @@ fn merge_crt_settings(snapshot: &SettingsState, config: &Config) -> (String, i32
     (standard, h_offset, v_offset)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "merging all settings is inherently verbose"
+)]
 fn merge_settings(snapshot: &SettingsState, config: &Config) -> SettingsState {
     let (crt_video_standard, crt_h_offset, crt_v_offset) = merge_crt_settings(snapshot, config);
     SettingsState {
@@ -684,6 +706,10 @@ fn merge_settings(snapshot: &SettingsState, config: &Config) -> SettingsState {
                 .unwrap_or(snapshot.browse_layout.as_str()),
         )
         .to_string(),
+        favorites_grouped: config
+            .settings
+            .favorites_grouped
+            .unwrap_or(snapshot.favorites_grouped),
         system_logo_style: normalize_system_logo_style(
             config
                 .settings
