@@ -94,6 +94,7 @@ ApplicationWindow {
     property bool firstRunIndexModalRequested: false
     property bool commercialNoticeModalRequested: false
     property bool coreVersionModalRequested: false
+    property bool randomFailedModalRequested: false
     property bool logUploadModalRequested: false
     property bool quitConfirmModalRequested: false
     property bool listPickerModalRequested: false
@@ -292,6 +293,7 @@ ApplicationWindow {
     property bool qrCodeModalVisible: false
     property bool commercialNoticeModalVisible: false
     property bool coreVersionModalVisible: false
+    property bool randomFailedModalVisible: false
     property bool firstRunIndexModalVisible: false
     property bool gameInfoModalVisible: false
     property bool logUploadModalVisible: false
@@ -409,6 +411,7 @@ ApplicationWindow {
     signal closeQrCodeRequested
     signal closeCommercialNoticeRequested
     signal closeCoreVersionRequested
+    signal closeRandomFailedRequested
     signal closeFirstRunIndexRequested
     signal closeLogUploadRequested
     signal closeQuitConfirmRequested
@@ -809,6 +812,22 @@ ApplicationWindow {
             }
 
             Loader {
+                id: randomFailedModalLoader
+                anchors.fill: parent
+                active: root.randomFailedModalRequested
+                sourceComponent: Component {
+                    Modal {
+                        open: root.randomFailedModalVisible
+                        kind: "action_error"
+                        title: qsTr("Random game")
+                        body: qsTr("No matching games found.")
+                        buttonLabel: qsTr("OK")
+                        onAccepted: root.closeRandomFailedRequested()
+                    }
+                }
+            }
+
+            Loader {
                 id: contextMenuLoader
                 anchors.fill: parent
                 active: root.contextMenuRequested
@@ -1128,7 +1147,7 @@ ApplicationWindow {
                                 label: qsTr("I understand")
                             }
                         ];
-                    if (root.coreVersionModalVisible)
+                    if (root.coreVersionModalVisible || root.randomFailedModalVisible)
                         return [
                             {
                                 button: "ButtonA",
@@ -1190,9 +1209,10 @@ ApplicationWindow {
                         // help bar must reflect that the actions row is
                         // navigable, otherwise the user reads "Quit only"
                         // and misses the Settings tile entirely. Category
-                        // tiles also expose an options menu for hide/scrape
-                        // actions; placeholders do not.
+                        // Real category tiles and Favorites action tile expose
+                        // Options; placeholders and other actions do not.
                         const categoryOptionsAvailable = root.hubScreen !== null && root.hubScreen.currentRow === 0 && Browse.CategoriesModel.count > 0;
+                        const favoritesOptionsAvailable = root.hubScreen !== null && root.hubScreen.currentRow === 1 && root.hubScreen.actionEntries[root.hubScreen.currentIndex]?.id === "favorites";
                         let row = [
                             {
                                 button: "Dpad",
@@ -1203,7 +1223,7 @@ ApplicationWindow {
                                 label: qsTr("Open")
                             }
                         ];
-                        if (categoryOptionsAvailable)
+                        if (categoryOptionsAvailable || favoritesOptionsAvailable)
                             row.push({
                                 button: "ButtonX",
                                 label: qsTr("Options")
@@ -1288,27 +1308,36 @@ ApplicationWindow {
                                 button: "ButtonA",
                                 label: qsTr("Open")
                             });
-                            if (isFavorites)
+                            if (isFavorites) {
                                 row.push({
                                     button: "ButtonX",
                                     label: qsTr("Options")
                                 });
+                                // Sort lives behind West; without a cue the
+                                // menu is invisible on a pad.
+                                row.push({
+                                    button: "ButtonY",
+                                    label: qsTr("View")
+                                });
+                            }
                             row.push({
                                 button: "ButtonB",
                                 label: qsTr("Back")
                             });
                             return row;
                         }
-                        return [
+                        // Empty/error.
+                        const fallback = [
                             {
                                 button: "ButtonA",
                                 label: qsTr("Retry")
-                            },
-                            {
-                                button: "ButtonB",
-                                label: qsTr("Back")
                             }
                         ];
+                        fallback.push({
+                            button: "ButtonB",
+                            label: qsTr("Back")
+                        });
+                        return fallback;
                     }
                     if (root.activeScreen === root.screenSettings) {
                         if (root.settingsScreen === null)
@@ -1442,16 +1471,24 @@ ApplicationWindow {
                         });
                         return row;
                     }
-                    return [
+                    const fallback = [
                         {
                             button: "ButtonA",
                             label: qsTr("Retry")
-                        },
-                        {
-                            button: "ButtonB",
-                            label: qsTr("Back")
                         }
                     ];
+                    // Empty favorites-only scope must keep View reachable so
+                    // user can clear filter. Errors retain Retry/Back only.
+                    if (root.gamesScreenState === "empty")
+                        fallback.push({
+                            button: "ButtonY",
+                            label: qsTr("View")
+                        });
+                    fallback.push({
+                        button: "ButtonB",
+                        label: qsTr("Back")
+                    });
+                    return fallback;
                 }
 
                 Row {

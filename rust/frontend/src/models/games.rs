@@ -182,6 +182,9 @@ const SUB_BATCH_FRAME_GAP_MS: u64 = 33;
 )]
 pub struct GamesModelRust {
     entries: Vec<BrowseEntry>,
+    // When true every browse and browse-index request carries
+    // `tags: ["user:favorite"]`; Core keeps directories navigable.
+    favorites_only: bool,
     // Parallel to `entries`: the sibling-diffed disambiguation display string
     // per row (what tiles/list rows show as the inline token suffix). Recomputed
     // whenever `entries` or `show_original_filenames` changes. See
@@ -330,12 +333,17 @@ pub struct GamesModelRust {
     letter_index_json: QString,
     letter_index_scheme: QString,
     letter_index_seq: Arc<AtomicU64>,
+    // Latest Core `launch.random` failure. Sequence rejects stale failures when
+    // user requests another pick before prior RPC settles.
+    random_error: QString,
+    random_seq: Arc<AtomicU64>,
 }
 
 impl Default for GamesModelRust {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            favorites_only: false,
             disambig_displays: Vec::new(),
             count: 0,
             loading: false,
@@ -385,6 +393,8 @@ impl Default for GamesModelRust {
             letter_index_json: QString::default(),
             letter_index_scheme: QString::default(),
             letter_index_seq: Arc::new(AtomicU64::new(0)),
+            random_error: QString::default(),
+            random_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -415,6 +425,7 @@ pub mod ffi {
         #[qproperty(bool, loading_more)]
         #[qproperty(QString, error_message)]
         #[qproperty(bool, has_next_page)]
+        #[qproperty(bool, favorites_only)]
         #[qproperty(i32, total_files)]
         #[qproperty(i32, total_dirs)]
         #[qproperty(i32, page_size)]
@@ -440,6 +451,7 @@ pub mod ffi {
         #[qproperty(i32, detail_cover_max_size, READ, WRITE = set_detail_cover_max_size, NOTIFY)]
         #[qproperty(QString, letter_index_json)]
         #[qproperty(QString, letter_index_scheme)]
+        #[qproperty(QString, random_error)]
         type GamesModel = super::GamesModelRust;
 
         #[qinvokable]
@@ -483,6 +495,15 @@ pub mod ffi {
 
         #[qinvokable]
         fn launch_text_at(self: &GamesModel, index: i32) -> QString;
+
+        #[qinvokable]
+        fn apply_favorites_filter(self: Pin<&mut GamesModel>, enabled: bool);
+
+        #[qinvokable]
+        fn launch_random(self: Pin<&mut GamesModel>);
+
+        #[qinvokable]
+        fn clear_random_error(self: Pin<&mut GamesModel>);
 
         #[qinvokable]
         fn write_card_at(self: Pin<&mut GamesModel>, index: i32);
@@ -555,6 +576,19 @@ pub mod ffi {
         #[inherit]
         #[cxx_name = "endInsertRows"]
         fn end_insert_rows(self: Pin<&mut GamesModel>);
+
+        #[inherit]
+        #[cxx_name = "beginRemoveRows"]
+        fn begin_remove_rows(
+            self: Pin<&mut GamesModel>,
+            parent: &QModelIndex,
+            first: i32,
+            last: i32,
+        );
+
+        #[inherit]
+        #[cxx_name = "endRemoveRows"]
+        fn end_remove_rows(self: Pin<&mut GamesModel>);
 
         // Qt signal bound as a callable so the cover-cache bridge can
         // invoke it directly from the Qt thread when an async cover
@@ -717,6 +751,7 @@ impl ffi::GamesModel {
             path.to_string(),
             systems,
             max_results,
+            favorites_tags(self.favorites_only),
         ))
     }
 
@@ -765,6 +800,7 @@ impl ffi::GamesModel {
         } else {
             vec![sid]
         };
+        let tags = favorites_tags(self.favorites_only);
         // Read the active ticket WITHOUT bumping it. `fetch_more`
         // continues the same path's load — only `set_system` /
         // `set_path` invalidate the prior cursor sequence.
@@ -801,6 +837,7 @@ impl ffi::GamesModel {
                     systems,
                     max_results: Some(max_results),
                     cursor,
+                    tags,
                     letter: None,
                     sort: None,
                 })
@@ -833,6 +870,7 @@ impl ffi::GamesModel {
         } else {
             vec![sid]
         };
+        let tags = favorites_tags(self.favorites_only);
         // Clear any facet from a prior scope to the loading state (empty groups,
         // empty scheme) so the rail shows "loading" rather than the previous
         // folder's buckets until the fresh fetch lands.
@@ -850,6 +888,7 @@ impl ffi::GamesModel {
                 .media_browse_index(MediaBrowseIndexParams {
                     path,
                     systems,
+                    tags,
                     sort: None,
                 })
                 .await;
@@ -952,6 +991,70 @@ impl ffi::GamesModel {
             return QString::default();
         }
         QString::from(portable_text_for_entry(&self.entries[index as usize]).as_str())
+    }
+
+    /// Toggle Core-backed favorites scope and reload current browse target.
+    fn apply_favorites_filter(mut self: Pin<&mut Self>, enabled: bool) {
+        if self.favorites_only == enabled {
+            return;
+        }
+        self.as_mut().set_favorites_only(enabled);
+        self.letter_index_seq.fetch_add(1, Ordering::SeqCst);
+        let path = self.current_path.to_string();
+        let system_id = self.current_system_id.to_string();
+        // Before first system selection, only seed preference. First browse
+        // will include correct tag scope without issuing an unscoped root RPC.
+        if path.is_empty() && system_id.is_empty() {
+            return;
+        }
+        let systems = if system_id.is_empty() {
+            Vec::new()
+        } else {
+            vec![system_id]
+        };
+        let eligible_for_auto_nav = path.is_empty();
+        self.start_initial_browse(path, systems, eligible_for_auto_nav);
+    }
+
+    /// Ask Core to choose uniformly from current recursive path/system scope.
+    /// Active Favorites mode is repeated as a `ZapScript` tag filter.
+    fn launch_random(mut self: Pin<&mut Self>) {
+        let Some(text) = games_random_launch_text(
+            &self.current_path.to_string(),
+            &self.current_system_id.to_string(),
+            self.favorites_only,
+        ) else {
+            self.as_mut()
+                .set_random_error(QString::from("missing random launch scope"));
+            return;
+        };
+        if !self.random_error.is_empty() {
+            self.as_mut().set_random_error(QString::default());
+        }
+        let seq = self.rust().random_seq.clone();
+        let ticket = seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let qt_thread = self.qt_thread();
+        let store = global_store();
+        global_handle().spawn(async move {
+            let result = store.run_mutation::<RunMutation>(RunParams { text }).await;
+            let _ = qt_thread.queue(move |mut model| {
+                if seq.load(Ordering::SeqCst) != ticket {
+                    return;
+                }
+                if let Err(error) = result {
+                    warn!("Core random launch failed: {}", error.message);
+                    model
+                        .as_mut()
+                        .set_random_error(QString::from(error.message.as_str()));
+                }
+            });
+        });
+    }
+
+    fn clear_random_error(mut self: Pin<&mut Self>) {
+        if !self.random_error.is_empty() {
+            self.as_mut().set_random_error(QString::default());
+        }
     }
 
     fn write_card_at(mut self: Pin<&mut Self>, index: i32) {
@@ -1490,6 +1593,7 @@ impl ffi::GamesModel {
             path,
             systems,
             max_results,
+            favorites_tags(self.favorites_only),
         ));
         let mut status_rx = resource.subscribe();
 
@@ -1545,6 +1649,48 @@ fn is_media_capable_entry(entry: &BrowseEntry) -> bool {
     entry.entry_type == "media"
         || (entry.entry_type == "directory"
             && (entry.media_id.is_some() || !entry.zap_script.is_empty()))
+}
+
+fn favorites_tags(enabled: bool) -> Vec<String> {
+    if enabled {
+        vec!["user:favorite".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Build Core-backed random command. Path form is recursive and includes
+/// virtual descendants; system form covers whole selected system.
+fn games_random_launch_text(
+    current_path: &str,
+    current_system_id: &str,
+    favorites_only: bool,
+) -> Option<String> {
+    let scope = if !current_path.is_empty() {
+        escape_zapscript_arg(current_path)
+    } else if !current_system_id.is_empty() {
+        escape_zapscript_arg(current_system_id)
+    } else {
+        return None;
+    };
+    let tags = if favorites_only {
+        "?tags=user:favorite"
+    } else {
+        ""
+    };
+    Some(format!("**launch.random:{scope}{tags}"))
+}
+
+/// Escape `ZapScript` separators while leaving path/system text readable.
+fn escape_zapscript_arg(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '^' | '?' | ',' | '&' | '|') {
+            escaped.push('^');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 fn run_text_for_entry(entry: &BrowseEntry) -> Option<String> {
@@ -2365,6 +2511,29 @@ fn apply_favorite_tags(
         return;
     }
     model.as_mut().rust_mut().entries[index as usize].tags = tags;
+    // Unfavoriting under Core-backed Favorites scope removes row immediately;
+    // endpoint invalidation then reconciles authoritative paged result.
+    let entry = &model.entries[index as usize];
+    if model.favorites_only && !entry.is_folder() && !has_favorite_tag(&entry.tags) {
+        let parent = QModelIndex::default();
+        model.as_mut().begin_remove_rows(&parent, index, index);
+        model.as_mut().rust_mut().entries.remove(index as usize);
+        let count = model.count.saturating_sub(1);
+        model.as_mut().rust_mut().count = count;
+        let displays = compute_disambig_displays(&model.entries, model.show_original_filenames);
+        model.as_mut().rust_mut().disambig_displays = displays;
+        model.as_mut().end_remove_rows();
+        model.as_mut().count_changed();
+        // Sibling groups above the removal may trim differently now.
+        if count > 0 {
+            let mut roles = QList::<i32>::default();
+            roles.append(DISAMBIGUATING_TAGS_ROLE);
+            let first = model.index(0, 0, &parent);
+            let last = model.index(count - 1, 0, &parent);
+            model.as_mut().data_changed(&first, &last, &roles);
+        }
+        return;
+    }
     let mut roles = QList::<i32>::default();
     roles.append(FAVORITE_ROLE);
     let parent = QModelIndex::default();
@@ -3424,12 +3593,12 @@ mod tests {
         child_launch_text_from_browse_result, chunk_for_subbatching, compute_unresolved_keys,
         cover_key_for_with, cover_placeholder_for, decide_initial, dedup_roots_drop_ancestors,
         detail_image_keys_from_meta, detail_tags_from_tags, display_name, display_title_for_entry,
-        entry_system_id, is_media_capable_entry, is_strict_ancestor_path, jump_fetch_limit,
-        media_capable_directory_browse_params, media_key_for, meta_params_for_entry,
-        ordered_detail_image_keys, position_of_game_path, prefetch_around_plan,
-        prefetch_cursor_window_plan, project_status, result_total_dirs, run_text_for_entry,
-        seeded_refetch_pagination_state, singleton_directory_needs_launch_resolution,
-        transform_entries, InitialAction, Projection,
+        entry_system_id, favorites_tags, games_random_launch_text, is_media_capable_entry,
+        is_strict_ancestor_path, jump_fetch_limit, media_capable_directory_browse_params,
+        media_key_for, meta_params_for_entry, ordered_detail_image_keys, position_of_game_path,
+        prefetch_around_plan, prefetch_cursor_window_plan, project_status, result_total_dirs,
+        run_text_for_entry, seeded_refetch_pagination_state,
+        singleton_directory_needs_launch_resolution, transform_entries, InitialAction, Projection,
     };
     use super::{FETCH_MORE_RAPID_CHUNK_SIZE, JUMP_FETCH_CHUNK_SIZE};
     use crate::media_image_cache::{MediaImageCache, MediaKey};
@@ -3467,6 +3636,37 @@ mod tests {
             zap_script: format!("@{system_id}/{name}"),
             ..BrowseEntry::default()
         }
+    }
+
+    #[test]
+    fn favorites_scope_maps_to_core_tag_filter() {
+        assert!(favorites_tags(false).is_empty());
+        assert_eq!(favorites_tags(true), vec!["user:favorite"]);
+    }
+
+    #[test]
+    fn random_launch_uses_recursive_path_and_active_tags() {
+        assert_eq!(
+            games_random_launch_text("/media/fat/games/NES/RPG", "NES", false).as_deref(),
+            Some("**launch.random:/media/fat/games/NES/RPG")
+        );
+        assert_eq!(
+            games_random_launch_text("/media/fat/games/NES/RPG", "NES", true).as_deref(),
+            Some("**launch.random:/media/fat/games/NES/RPG?tags=user:favorite")
+        );
+    }
+
+    #[test]
+    fn random_launch_uses_system_at_root_and_escapes_separators() {
+        assert_eq!(
+            games_random_launch_text("", "SNES", false).as_deref(),
+            Some("**launch.random:SNES")
+        );
+        assert_eq!(
+            games_random_launch_text("/games/A?B,C&D|E^F", "SNES", false).as_deref(),
+            Some("**launch.random:/games/A^?B^,C^&D^|E^^F")
+        );
+        assert!(games_random_launch_text("", "", false).is_none());
     }
 
     #[test]

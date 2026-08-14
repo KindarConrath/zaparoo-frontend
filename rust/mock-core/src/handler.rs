@@ -63,6 +63,7 @@ pub fn dispatch(text: &str) -> String {
         "settings.update" => Some(fixtures::settings_update_response(&req.params)),
         "media.search" => Some(fixtures::media_search_response(&req.params)),
         "media.browse" => Some(fixtures::media_browse_response(&req.params)),
+        "media.browse.index" => Some(fixtures::media_browse_index_response(&req.params)),
         "media.history" => Some(fixtures::media_history_response(&req.params)),
         "media.history.latest" => Some(fixtures::media_history_latest_response()),
         "run" => {
@@ -182,15 +183,101 @@ mod tests {
 
     #[test]
     fn media_search_emits_pagination_envelope() {
-        let req = r#"{"jsonrpc":"2.0","id":"1","method":"media.search","params":{"systems":[],"maxResults":50}}"#;
+        // A page that covers every row reports no next page and no cursor.
+        let req = r#"{"jsonrpc":"2.0","id":"1","method":"media.search","params":{"systems":[],"maxResults":1000}}"#;
         let resp = parse(&dispatch(req));
         let pagination = resp["result"]["pagination"]
             .as_object()
             .expect("pagination object");
         assert_eq!(pagination["hasNextPage"], Value::Bool(false));
-        assert_eq!(pagination["pageSize"], Value::from(50));
+        assert_eq!(pagination["pageSize"], Value::from(1000));
+        assert!(!pagination.contains_key("nextCursor"));
         // Deprecated but still present for backward compatibility.
         assert_eq!(resp["result"]["total"], Value::from(-1));
+    }
+
+    // Favorites uses cursor pagination. Short pages must advertise a next
+    // page and return a cursor that resumes where prior page stopped.
+    #[test]
+    fn media_search_paginates_with_a_resumable_cursor() {
+        let first = parse(&dispatch(
+            r#"{"jsonrpc":"2.0","id":"1","method":"media.search","params":{"systems":[],"maxResults":5}}"#,
+        ));
+        let page1 = first["result"]["results"].as_array().expect("array");
+        assert_eq!(page1.len(), 5);
+        assert_eq!(
+            first["result"]["pagination"]["hasNextPage"],
+            Value::Bool(true)
+        );
+        let cursor = first["result"]["pagination"]["nextCursor"]
+            .as_str()
+            .expect("cursor");
+        // Offset cursor: page two must resume exactly where page one ended,
+        // not skip rows or restart inside page one.
+        assert_eq!(cursor, "5");
+
+        let second = parse(&dispatch(&format!(
+            r#"{{"jsonrpc":"2.0","id":"2","method":"media.search","params":{{"systems":[],"maxResults":5,"cursor":"{cursor}"}}}}"#
+        )));
+        let page2 = second["result"]["results"].as_array().expect("array");
+        assert_eq!(page2.len(), 5);
+        // The second page resumes rather than repeating the first.
+        assert_ne!(page1[0]["path"], page2[0]["path"]);
+    }
+
+    // Favorites are a tag query. Without this the Favorites screen in
+    // `just mock-core` lists every game and the feature cannot be exercised.
+    #[test]
+    fn media_search_filters_by_user_favorite_tag() {
+        let req = r#"{"jsonrpc":"2.0","id":"1","method":"media.search","params":{"systems":[],"maxResults":1000,"tags":["user:favorite"]}}"#;
+        let resp = parse(&dispatch(req));
+        let results = resp["result"]["results"].as_array().expect("array");
+        assert!(!results.is_empty(), "some mock games are favorites");
+
+        let unfiltered = parse(&dispatch(
+            r#"{"jsonrpc":"2.0","id":"2","method":"media.search","params":{"systems":[],"maxResults":1000}}"#,
+        ));
+        let all = unfiltered["result"]["results"].as_array().expect("array");
+        assert!(
+            results.len() < all.len(),
+            "the tag filter must narrow the set"
+        );
+
+        for game in results {
+            let tags = game["tags"].as_array().expect("tags array");
+            assert!(
+                tags.iter()
+                    .any(|tag| tag["type"] == "user" && tag["tag"] == "favorite"),
+                "every returned row carries the favorite tag"
+            );
+        }
+    }
+
+    #[test]
+    fn media_search_applies_name_sort_before_paging() {
+        let req = r#"{"jsonrpc":"2.0","id":"1","method":"media.search","params":{"maxResults":1000,"sort":"name-asc"}}"#;
+        let resp = parse(&dispatch(req));
+        let results = resp["result"]["results"].as_array().expect("array");
+        let names: Vec<String> = results
+            .iter()
+            .filter_map(|game| game["name"].as_str())
+            .map(str::to_lowercase)
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+    }
+
+    // Search rows carry real system metadata rather than bare ids.
+    #[test]
+    fn media_search_rows_carry_system_name_and_category() {
+        let req = r#"{"jsonrpc":"2.0","id":"1","method":"media.search","params":{"systems":["NES"],"maxResults":5}}"#;
+        let resp = parse(&dispatch(req));
+        let results = resp["result"]["results"].as_array().expect("array");
+        let system = &results[0]["system"];
+        assert_eq!(system["id"], Value::from("NES"));
+        assert_eq!(system["name"], Value::from("Nintendo Entertainment System"));
+        assert_eq!(system["category"], Value::from("Consoles"));
     }
 
     #[test]
@@ -209,6 +296,48 @@ mod tests {
         }
         assert!(resp["result"]["totalFiles"].is_number());
         assert!(resp["result"]["pagination"].is_object());
+    }
+
+    #[test]
+    fn media_browse_filters_and_pages_favorites() {
+        let first = parse(&dispatch(
+            r#"{"jsonrpc":"2.0","id":"1","method":"media.browse","params":{"path":"/games","maxResults":2,"tags":["user:favorite"]}}"#,
+        ));
+        let page1 = first["result"]["entries"].as_array().expect("array");
+        assert_eq!(page1.len(), 2);
+        assert!(page1
+            .iter()
+            .all(|entry| entry["tags"].as_array().is_some_and(|tags| tags
+                .iter()
+                .any(|tag| tag["type"] == "user" && tag["tag"] == "favorite"))));
+        assert_eq!(first["result"]["pagination"]["hasNextPage"], true);
+        let cursor = first["result"]["pagination"]["nextCursor"]
+            .as_str()
+            .expect("cursor");
+        let second = parse(&dispatch(&format!(
+            r#"{{"jsonrpc":"2.0","id":"2","method":"media.browse","params":{{"path":"/games","maxResults":2,"cursor":"{cursor}","tags":["user:favorite"]}}}}"#
+        )));
+        let page2 = second["result"]["entries"].as_array().expect("array");
+        assert!(!page2.is_empty());
+        assert_ne!(page1[0]["path"], page2[0]["path"]);
+    }
+
+    #[test]
+    fn media_browse_index_matches_favorite_scope() {
+        let req = r#"{"jsonrpc":"2.0","id":"1","method":"media.browse.index","params":{"path":"/games","tags":["user:favorite"]}}"#;
+        let resp = parse(&dispatch(req));
+        let groups = resp["result"]["groups"].as_array().expect("array");
+        let indexed: u64 = groups
+            .iter()
+            .filter_map(|group| group["count"].as_u64())
+            .sum();
+        let browse = parse(&dispatch(
+            r#"{"jsonrpc":"2.0","id":"2","method":"media.browse","params":{"path":"/games","maxResults":1000,"tags":["user:favorite"]}}"#,
+        ));
+        assert_eq!(
+            indexed,
+            browse["result"]["totalFiles"].as_u64().unwrap_or(0)
+        );
     }
 
     #[test]

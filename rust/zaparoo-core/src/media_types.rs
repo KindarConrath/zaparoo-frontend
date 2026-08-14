@@ -73,6 +73,10 @@ pub struct MediaSearchParams {
     /// Filter to entries whose name starts with the given letter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub letter: Option<String>,
+    /// Explicit server-side result order. Supported values mirror Core:
+    /// `name-asc`, `name-desc`, `filename-asc`, and `filename-desc`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -209,6 +213,9 @@ pub struct MediaBrowseParams {
     pub max_results: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// Filter direct media files by tags while keeping directories navigable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     /// Filter to entries whose name starts with the given letter.
     /// Validated by Core against a single-letter pattern.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -335,6 +342,8 @@ pub struct MediaBrowseIndexParams {
     pub path: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub systems: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
 }
@@ -1342,6 +1351,7 @@ mod tests {
             cursor: Some("opaque".into()),
             tags: vec!["region:usa".into()],
             letter: Some("M".into()),
+            sort: Some("name-asc".into()),
         };
         let json = serde_json::to_value(&params).expect("serialise");
         let object = json.as_object().expect("object");
@@ -1355,6 +1365,10 @@ mod tests {
             Some("opaque")
         );
         assert_eq!(object.get("letter").and_then(|v| v.as_str()), Some("M"));
+        assert_eq!(
+            object.get("sort").and_then(|v| v.as_str()),
+            Some("name-asc")
+        );
         assert_eq!(
             object.get("tags").and_then(|v| v.as_array()).map(Vec::len),
             Some(1)
@@ -1503,12 +1517,39 @@ mod tests {
         let object = json.as_object().expect("object");
         assert!(!object.contains_key("path"));
         assert!(!object.contains_key("sort"));
+        assert!(!object.contains_key("tags"));
         assert_eq!(
             object
                 .get("systems")
                 .and_then(|v| v.as_array())
                 .map(Vec::len),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn media_browse_index_params_serialises_tag_scope() {
+        let params = MediaBrowseIndexParams {
+            path: "/roms/SNES".into(),
+            systems: vec!["SNES".into()],
+            tags: vec!["user:favorite".into()],
+            sort: None,
+        };
+        let json = serde_json::to_value(&params).expect("serialise");
+        let object = json.as_object().expect("object");
+        assert_eq!(
+            object
+                .get("tags")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            object
+                .get("tags")
+                .and_then(|value| value.get(0))
+                .and_then(|value| value.as_str()),
+            Some("user:favorite")
         );
     }
 
@@ -1543,6 +1584,7 @@ mod tests {
             systems: vec!["SNES".into()],
             max_results: Some(100),
             cursor: Some("opaque".into()),
+            tags: vec!["user:favorite".into()],
             letter: Some("M".into()),
             sort: Some("name-asc".into()),
         };
@@ -1557,6 +1599,10 @@ mod tests {
             Some("opaque")
         );
         assert_eq!(object.get("letter").and_then(|v| v.as_str()), Some("M"));
+        assert_eq!(
+            object.get("tags").and_then(|v| v.as_array()).map(Vec::len),
+            Some(1)
+        );
         assert_eq!(
             object.get("sort").and_then(|v| v.as_str()),
             Some("name-asc")
