@@ -32,7 +32,6 @@ ApplicationWindow {
     readonly property string screenSystems: ScreenManager.screenSystems
     readonly property string screenGames: ScreenManager.screenGames
     readonly property string screenFavorites: ScreenManager.screenFavorites
-    readonly property string screenFavoriteSystems: ScreenManager.screenFavoriteSystems
     readonly property string screenRecents: ScreenManager.screenRecents
     readonly property string screenUpdate: ScreenManager.screenUpdate
     readonly property string screenSettings: ScreenManager.screenSettings
@@ -84,8 +83,6 @@ ApplicationWindow {
     property bool systemsScreenRequested: false
     property bool gamesScreenRequested: false
     property bool favoritesScreenRequested: false
-    property bool favoriteSystemsScreenRequested: false
-    property string favoritesScreenSystemId: ""
     property bool recentsScreenRequested: false
     property bool settingsScreenRequested: false
     property bool aboutScreenRequested: false
@@ -97,6 +94,7 @@ ApplicationWindow {
     property bool firstRunIndexModalRequested: false
     property bool commercialNoticeModalRequested: false
     property bool coreVersionModalRequested: false
+    property bool randomFailedModalRequested: false
     property bool logUploadModalRequested: false
     property bool quitConfirmModalRequested: false
     property bool listPickerModalRequested: false
@@ -266,7 +264,6 @@ ApplicationWindow {
     property var systemsScreen: systemsScreenLoader.item
     property var gamesScreen: gamesScreenLoader.item
     property var favoritesScreen: favoritesScreenLoader.item
-    property var favoriteSystemsScreen: favoriteSystemsScreenLoader.item
     property var recentsScreen: recentsScreenLoader.item
     property var updateScreen: updateScreenLoader.item
     property var settingsScreen: settingsScreenLoader.item
@@ -296,6 +293,7 @@ ApplicationWindow {
     property bool qrCodeModalVisible: false
     property bool commercialNoticeModalVisible: false
     property bool coreVersionModalVisible: false
+    property bool randomFailedModalVisible: false
     property bool firstRunIndexModalVisible: false
     property bool gameInfoModalVisible: false
     property bool logUploadModalVisible: false
@@ -365,8 +363,6 @@ ApplicationWindow {
 
     readonly property string favoritesScreenState: root.activeScreen !== root.screenFavorites ? "" : ((Browse.FavoritesModel.loading || root.catalogStillBooting) ? "loading" : ((Browse.FavoritesModel.error_message ?? "") !== "" ? "error" : (Browse.FavoritesModel.count === 0 ? "empty" : "ready")))
 
-    readonly property string favoriteSystemsScreenState: root.activeScreen !== root.screenFavoriteSystems ? "" : ((Browse.FavoriteSystemsModel.loading || root.catalogStillBooting) ? "loading" : ((Browse.FavoriteSystemsModel.error_message ?? "") !== "" ? "error" : (Browse.FavoriteSystemsModel.count === 0 ? "empty" : "ready")))
-
     readonly property string hubScreenState: (Browse.CategoriesModel.error_message ?? "") !== "" ? "error" : (Browse.CategoriesModel.count === 0 ? "empty" : "ready")
 
     readonly property string recentsScreenState: root.activeScreen !== root.screenRecents ? "" : ((Browse.RecentsModel.loading || root.catalogStillBooting) ? "loading" : ((Browse.RecentsModel.error_message ?? "") !== "" ? "error" : (Browse.RecentsModel.count === 0 ? "empty" : "ready")))
@@ -375,7 +371,7 @@ ApplicationWindow {
     readonly property bool _browseListLayout: Browse.Settings.current_browse_layout === "list"
     readonly property bool _browseTateListLayout: root._browseListLayout && root.displayOrientation !== "horizontal"
     readonly property string _browseViewId: {
-        if (root.activeScreen === root.screenSystems || root.activeScreen === root.screenFavoriteSystems)
+        if (root.activeScreen === root.screenSystems)
             return root._browseListLayout ? (root._browseTateListLayout ? "systemsListTate" : "systemsList") : "systemsGrid";
         if (root.activeScreen === root.screenGames || root.activeScreen === root.screenFavorites || root.activeScreen === root.screenRecents)
             return root._browseListLayout ? (root._browseTateListLayout ? "gamesListTate" : "gamesList") : "gamesGrid";
@@ -398,13 +394,11 @@ ApplicationWindow {
         if (Browse.Settings.current_browse_layout === "list")
             return "";
         if (root.activeScreen === root.screenSystems)
-            return Browse.SystemsModel.current_category;
+            return CategoryIds.displayName(Browse.SystemsModel.current_category);
         if (root.activeScreen === root.screenGames)
             return root._crtGamesHeaderTitle;
         if (root.activeScreen === root.screenFavorites)
             return qsTr("Favorites");
-        if (root.activeScreen === root.screenFavoriteSystems)
-            return qsTr("Favorite Systems");
         if (root.activeScreen === root.screenRecents)
             return qsTr("Recently Played");
         return "";
@@ -417,6 +411,7 @@ ApplicationWindow {
     signal closeQrCodeRequested
     signal closeCommercialNoticeRequested
     signal closeCoreVersionRequested
+    signal closeRandomFailedRequested
     signal closeFirstRunIndexRequested
     signal closeLogUploadRequested
     signal closeQuitConfirmRequested
@@ -690,21 +685,6 @@ ApplicationWindow {
                             anchors.fill: parent
                             transitioning: root.transitionCueVisible
                             optimisticLoading: root.activeScreen === root.screenFavorites && root.catalogStillBooting
-                            selectedSystemId: root.favoritesScreenSystemId
-                        }
-                    }
-                }
-
-                Loader {
-                    id: favoriteSystemsScreenLoader
-                    anchors.fill: parent
-                    active: root.favoriteSystemsScreenRequested
-                    visible: status === Loader.Ready && root.activeScreen === root.screenFavoriteSystems
-                    sourceComponent: Component {
-                        FavoriteSystemsScreen {
-                            anchors.fill: parent
-                            transitioning: root.transitionCueVisible
-                            optimisticLoading: root.activeScreen === root.screenFavoriteSystems && root.catalogStillBooting
                         }
                     }
                 }
@@ -827,6 +807,22 @@ ApplicationWindow {
                         body: qsTr("This frontend needs Zaparoo Core %1 or newer. You're running %2. Some features may not work until you update.").arg(Browse.AppStatus.min_core_version).arg(Browse.AppStatus.core_version)
                         buttonLabel: qsTr("OK")
                         onAccepted: root.closeCoreVersionRequested()
+                    }
+                }
+            }
+
+            Loader {
+                id: randomFailedModalLoader
+                anchors.fill: parent
+                active: root.randomFailedModalRequested
+                sourceComponent: Component {
+                    Modal {
+                        open: root.randomFailedModalVisible
+                        kind: "action_error"
+                        title: qsTr("Random game")
+                        body: qsTr("No matching games found.")
+                        buttonLabel: qsTr("OK")
+                        onAccepted: root.closeRandomFailedRequested()
                     }
                 }
             }
@@ -1151,7 +1147,7 @@ ApplicationWindow {
                                 label: qsTr("I understand")
                             }
                         ];
-                    if (root.coreVersionModalVisible)
+                    if (root.coreVersionModalVisible || root.randomFailedModalVisible)
                         return [
                             {
                                 button: "ButtonA",
@@ -1213,9 +1209,10 @@ ApplicationWindow {
                         // help bar must reflect that the actions row is
                         // navigable, otherwise the user reads "Quit only"
                         // and misses the Settings tile entirely. Category
-                        // tiles also expose an options menu for hide/scrape
-                        // actions; placeholders do not.
+                        // Real category tiles and Favorites action tile expose
+                        // Options; placeholders and other actions do not.
                         const categoryOptionsAvailable = root.hubScreen !== null && root.hubScreen.currentRow === 0 && Browse.CategoriesModel.count > 0;
+                        const favoritesOptionsAvailable = root.hubScreen !== null && root.hubScreen.currentRow === 1 && root.hubScreen.actionEntries[root.hubScreen.currentIndex]?.id === "favorites";
                         let row = [
                             {
                                 button: "Dpad",
@@ -1226,7 +1223,7 @@ ApplicationWindow {
                                 label: qsTr("Open")
                             }
                         ];
-                        if (categoryOptionsAvailable)
+                        if (categoryOptionsAvailable || favoritesOptionsAvailable)
                             row.push({
                                 button: "ButtonX",
                                 label: qsTr("Options")
@@ -1282,14 +1279,13 @@ ApplicationWindow {
                             }
                         ];
                     }
-                    if (root.activeScreen === root.screenFavorites || root.activeScreen === root.screenRecents || root.activeScreen === root.screenFavoriteSystems) {
+                    if (root.activeScreen === root.screenFavorites || root.activeScreen === root.screenRecents) {
                         const isFavorites = root.activeScreen === root.screenFavorites;
-                        const isFavoriteSystems = root.activeScreen === root.screenFavoriteSystems;
-                        const state = isFavorites ? root.favoritesScreenState : (isFavoriteSystems ? root.favoriteSystemsScreenState : root.recentsScreenState);
-                        const screen = isFavorites ? root.favoritesScreen : (isFavoriteSystems ? root.favoriteSystemsScreen : root.recentsScreen);
+                        const state = isFavorites ? root.favoritesScreenState : root.recentsScreenState;
+                        const screen = isFavorites ? root.favoritesScreen : root.recentsScreen;
                         if (screen === null)
                             return [];
-                        const grid = isFavorites ? screen.favoritesGrid : (isFavoriteSystems ? screen.favoriteSystemsGrid : screen.recentsGrid);
+                        const grid = isFavorites ? screen.favoritesGrid : screen.recentsGrid;
                         if (state === "loading")
                             return [
                                 {
@@ -1312,32 +1308,36 @@ ApplicationWindow {
                                 button: "ButtonA",
                                 label: qsTr("Open")
                             });
-                            if (isFavorites || isFavoriteSystems)
+                            if (isFavorites) {
                                 row.push({
                                     button: "ButtonX",
                                     label: qsTr("Options")
                                 });
-                            if (isFavorites || isFavoriteSystems)
+                                // Sort lives behind West; without a cue the
+                                // menu is invisible on a pad.
                                 row.push({
                                     button: "ButtonY",
                                     label: qsTr("View")
                                 });
+                            }
                             row.push({
                                 button: "ButtonB",
                                 label: qsTr("Back")
                             });
                             return row;
                         }
-                        return [
+                        // Empty/error.
+                        const fallback = [
                             {
                                 button: "ButtonA",
                                 label: qsTr("Retry")
-                            },
-                            {
-                                button: "ButtonB",
-                                label: qsTr("Back")
                             }
                         ];
+                        fallback.push({
+                            button: "ButtonB",
+                            label: qsTr("Back")
+                        });
+                        return fallback;
                     }
                     if (root.activeScreen === root.screenSettings) {
                         if (root.settingsScreen === null)
@@ -1471,16 +1471,24 @@ ApplicationWindow {
                         });
                         return row;
                     }
-                    return [
+                    const fallback = [
                         {
                             button: "ButtonA",
                             label: qsTr("Retry")
-                        },
-                        {
-                            button: "ButtonB",
-                            label: qsTr("Back")
                         }
                     ];
+                    // Empty favorites-only scope must keep View reachable so
+                    // user can clear filter. Errors retain Retry/Back only.
+                    if (root.gamesScreenState === "empty")
+                        fallback.push({
+                            button: "ButtonY",
+                            label: qsTr("View")
+                        });
+                    fallback.push({
+                        button: "ButtonB",
+                        label: qsTr("Back")
+                    });
+                    return fallback;
                 }
 
                 Row {

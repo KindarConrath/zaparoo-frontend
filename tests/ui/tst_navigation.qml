@@ -19,14 +19,25 @@ import Zaparoo.Theme
 // can't exercise with keyClick because offscreen ApplicationWindows
 // don't receive routed key events reliably.
 TestCase {
+    id: testCase
+
     name: "UiNavigation"
     when: windowShown
+
+    // View preferences persist to disk; restore machine's original values.
+    property string _originalFavoritesSort: ""
+    property bool _originalGamesFavoritesFilter: false
 
     Main {
         id: main
         fullScreen: false
         width: 1280
         height: 720
+    }
+
+    Component.onCompleted: {
+        testCase._originalFavoritesSort = Browse.FavoritesModel.sort_mode ?? "";
+        testCase._originalGamesFavoritesFilter = Browse.GamesState.favorites_filter === true;
     }
 
     function init(): void {
@@ -61,6 +72,16 @@ TestCase {
 
     function cleanup(): void {
         Motion.enabled = true;
+        // A modal left open swallows every routed action, so the next test
+        // would fail for a reason that has nothing to do with what it tests.
+        if (main.listPickerModalVisible)
+            main.closeListPickerModal();
+        if (main.randomFailedModalVisible)
+            main.closeRandomFailedModal();
+        // Restore persistent preferences changed by menu-routing tests.
+        Browse.FavoritesModel.set_sort_mode(testCase._originalFavoritesSort);
+        Browse.GamesModel.apply_favorites_filter(testCase._originalGamesFavoritesFilter);
+        Browse.GamesState.favorites_filter = testCase._originalGamesFavoritesFilter;
     }
 
     function test_initial_state_is_hub(): void {
@@ -541,16 +562,17 @@ TestCase {
 
     function test_context_menu_systems_owner_includes_media_actions(): void {
         const entries = main.buildContextMenuEntries("systems", "", false, false, false, "", false);
-        compare(_idsOf(entries), ["launch_system", "index_system", "scrape_system", "toggle_hide_system"], "Systems context menu includes system-scoped maintenance actions");
+        compare(_idsOf(entries), ["launch_system", "launch_random_system", "index_system", "scrape_system", "toggle_hide_system"], "Systems context menu includes random and maintenance actions");
         verify(entries[0].label.length > 0, "Launch core label is set (not asserted in English for translation)");
-        verify(entries[1].label.length > 0, "Update media database label is set");
-        verify(entries[2].label.length > 0, "Scrape metadata label is set");
-        verify(entries[3].label.length > 0, "Hide label is set");
+        verify(entries[1].label.length > 0, "Random game label is set");
+        verify(entries[2].label.length > 0, "Update media database label is set");
+        verify(entries[3].label.length > 0, "Scrape metadata label is set");
+        verify(entries[4].label.length > 0, "Hide label is set");
     }
 
     function test_context_menu_systems_has_nfc_does_not_add_entries(): void {
         const entries = main.buildContextMenuEntries("systems", "", false, true, false, "", false);
-        compare(_idsOf(entries), ["launch_system", "index_system", "scrape_system", "toggle_hide_system"], "has_nfc must not affect the systems menu");
+        compare(_idsOf(entries), ["launch_system", "launch_random_system", "index_system", "scrape_system", "toggle_hide_system"], "has_nfc must not affect the systems menu");
     }
 
     // Category index/scrape are gated on the category having at least one
@@ -613,6 +635,12 @@ TestCase {
         compare(_idsOf(entries), ["switch_to_favorites"]);
     }
 
+    function test_context_menu_hub_favorites_offers_random_only(): void {
+        const entries = main.buildContextMenuEntries("hub_favorites", "", false, false, false, "");
+        compare(_idsOf(entries), ["launch_random_favorite"]);
+        verify(entries[0].label.length > 0);
+    }
+
     function test_context_menu_recents_omits_more_info(): void {
         const entries = main.buildContextMenuEntries("recents", "", false, false, false, "", false, "");
         compare(_idsOf(entries), ["launch_game"]);
@@ -659,5 +687,128 @@ TestCase {
         // in current zapscripts but a future zapscript with arguments
         // containing them must still survive a round-trip.
         compare(main._buildQrPayload("a b&c?d"), "https://zaparoo.app/write?v=a%20b%26c%3Fd");
+    }
+
+    function test_games_page_menu_offers_core_backed_actions(): void {
+        // Nonzero scope exposes recursive Core random action.
+        Browse.GamesModel.total_files = 5;
+        main.openPageMenu();
+        tryCompare(main, "listPickerModalVisible", true);
+        const ids = main.listPickerEntries.map(e => e.id);
+        verify(ids.indexOf("jump_letter") !== -1, "Go to entry present");
+        verify(ids.indexOf("launch_random") !== -1, "Random entry present");
+        verify(ids.indexOf("games_filter") !== -1, "Show entry present");
+        main.closeListPickerModal();
+        Browse.GamesModel.total_files = 0;
+    }
+
+    function test_random_launch_failure_is_reported(): void {
+        // Harness has no browse scope, so model rejects before issuing RPC.
+        Browse.GamesModel.launch_random();
+        tryCompare(main, "randomFailedModalVisible", true);
+        verify((Browse.GamesModel.random_error ?? "") !== "", "failure reason recorded");
+        main.handleAction("cancel");
+        tryCompare(main, "randomFailedModalVisible", false);
+        compare(Browse.GamesModel.random_error, "", "dismissal clears reason");
+    }
+
+    function test_games_filter_selection_applies_and_persists(): void {
+        Browse.GamesModel.apply_favorites_filter(false);
+        Browse.GamesState.favorites_filter = false;
+
+        main.openPageMenu();
+        main.listPickerAccepted("page_menu", "games_filter");
+        tryCompare(main, "listPickerModalVisible", true);
+        compare(main.listPickerFieldId, "games_filter_pick");
+        const ids = main.listPickerEntries.map(e => e.id);
+        verify(ids.indexOf("all") !== -1, "All option present");
+        verify(ids.indexOf("favorites") !== -1, "Favorites option present");
+
+        main.listPickerAccepted("games_filter_pick", "favorites");
+        tryCompare(main, "listPickerModalVisible", false);
+        compare(Browse.GamesModel.favorites_only, true);
+        compare(Browse.GamesState.favorites_filter, true);
+        compare(main.gamesScreen.pageMenuEnabledWhenEmpty, true, "View remains reachable when filtered folder is empty");
+    }
+
+    // Favorites View exposes Core-backed sorting and tagged random. Grouping is
+    // intentionally absent from this menu.
+    function test_favorites_page_menu_offers_sort_and_random(): void {
+        main.openFavoritesPageMenu();
+        tryCompare(main, "listPickerModalVisible", true);
+        const ids = main.listPickerEntries.map(e => e.id);
+        verify(ids.indexOf("favorites_sort") !== -1, "Sort entry present");
+        verify(ids.indexOf("launch_random_favorite") !== -1, "Random favorite entry present");
+        compare(ids.indexOf("favorites_filter"), -1, "grouping is not part of this PR");
+        main.closeListPickerModal();
+    }
+
+    // Choosing Sort must open a second picker on its own field id, and the
+    // accepted value must reach the model. A wrong field id would silently
+    // route the choice nowhere.
+    function test_favorites_sort_selection_applies_to_model(): void {
+        main.openFavoritesPageMenu();
+        main.listPickerAccepted("page_menu_favorites", "favorites_sort");
+        tryCompare(main, "listPickerModalVisible", true);
+        compare(main.listPickerFieldId, "favorites_sort_pick");
+        const ids = main.listPickerEntries.map(e => e.id);
+        verify(ids.indexOf("name") !== -1, "A-Z option present");
+        // Default carries a real id, not "" — ListPickerModal never emits an
+        // accept for an empty id.
+        verify(ids.indexOf(main._favoritesSortDefault) !== -1, "Default option present");
+
+        main.listPickerAccepted("favorites_sort_pick", "name");
+        tryCompare(main, "listPickerModalVisible", false);
+        compare(Browse.FavoritesModel.sort_mode, "name");
+
+        // Restore the default so the persisted value doesn't leak into other
+        // tests or the dev machine's config file.
+        main.openFavoritesPageMenu();
+        main.listPickerAccepted("page_menu_favorites", "favorites_sort");
+        main.listPickerAccepted("favorites_sort_pick", main._favoritesSortDefault);
+        compare(Browse.FavoritesModel.sort_mode, "");
+    }
+
+    // Blanket guard for the whole class of bug that shipped twice: any menu
+    // row carrying an empty id is silently swallowed by ListPickerModal, so
+    // no picker this app builds may contain one.
+    function test_no_picker_row_uses_the_swallowed_empty_id(): void {
+        const pickers = [
+            {
+                open: () => main.openPageMenu(),
+                name: "games View"
+            },
+            {
+                open: () => main.openFavoritesPageMenu(),
+                name: "favorites View"
+            },
+            {
+                open: () => main.openFavoritesSortMenu(),
+                name: "favorites Sort"
+            }
+        ];
+        for (let i = 0; i < pickers.length; i++) {
+            main.closeListPickerModal();
+            pickers[i].open();
+            tryCompare(main, "listPickerModalVisible", true);
+            const ids = main.listPickerEntries.map(e => e.id);
+            for (let j = 0; j < ids.length; j++)
+                verify(ids[j] !== "", pickers[i].name + " row " + j + " has an empty id, which ListPickerModal never emits");
+            main.closeListPickerModal();
+        }
+    }
+
+    // Regression: the Default row had an empty id, so once A-Z was chosen
+    // there was no way back to Core's order from this menu.
+    function test_favorites_default_sort_restores_core_order(): void {
+        Browse.FavoritesModel.set_sort_mode("name");
+        compare(Browse.FavoritesModel.sort_mode, "name");
+
+        main.openFavoritesSortMenu();
+        tryCompare(main, "listPickerModalVisible", true);
+        // Default is the first row; drive the real accept path.
+        main.listPickerModal.currentIndex = 0;
+        main.listPickerModal.handleAction("accept");
+        compare(Browse.FavoritesModel.sort_mode, "", "Default restores Core order");
     }
 }

@@ -5,22 +5,13 @@
 // `Browse.FavoritesModel` — flat list of favorite media, surfaced
 // from Core's `media.search` endpoint.
 //
-// Two paths into the model:
+// Page 1 uses a sort-scoped `MediaFavoritesEndpoint` subscription so a
+// cached result can seed first paint synchronously. Cursor follow-ups call
+// `Client::media_search` directly with the same sort. Separate scope and
+// cursor tickets reject callbacks from superseded subscriptions or page chains.
 //
-//   * `bind_to_endpoint!` seeds page 1 from `MediaFavoritesEndpoint` so
-//     a screen flip into Favorites has data on the first paint when the
-//     resource is already `Ready`. The fixed args (`maxResults = 25`)
-//     match what the UI requests.
-//
-//   * `fetch_more()` — cursor-driven follow-ups bypass the cache and
-//     call `Client::media_search` directly, just like games. The
-//     model owns the cursor, the in-flight `loading_more` debounce,
-//     and the seq ticket that disarms stale callbacks.
-//
-// Search is flat (no folder navigation, no auto-nav) so this model
-// stays a fraction of the size of `GamesModel`. Card-write isn't wired
-// here yet — runtime launches prefer the exact indexed path, while
-// QR/card-write payloads prefer Core's portable ZapScript.
+// Search stays flat and paginated; frontend never materializes full Favorites
+// set for sorting.
 
 use crate::media_image_cache::{global_media_image_cache, MediaImageCache, MediaKey};
 use crate::media_meta_cache::{global_media_meta_cache, MetaLookup};
@@ -42,15 +33,16 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 use zaparoo_core::client::ClientError;
+use zaparoo_core::config::{load_config, save_favorites_sort};
 use zaparoo_core::endpoints::media_favorites::{FavoritesArgs, MediaFavoritesEndpoint};
 use zaparoo_core::endpoints::media_tags_update::MediaTagsUpdateMutation;
 use zaparoo_core::endpoints::readers_write::ReadersWriteMutation;
 use zaparoo_core::endpoints::run::RunMutation;
-use zaparoo_core::endpoints::systems_favorites::SystemsFavoritesEndpoint;
 use zaparoo_core::media_types::{
     MediaItem, MediaMeta, MediaMetaParams, MediaSearchParams, MediaSearchResult,
     MediaTagsUpdateParams, ReadersWriteParams, RunParams, TagInfo,
 };
+use zaparoo_core::platform_paths::config_file_path;
 use zaparoo_core::remote_resource::ResourceStatus;
 
 const NAME_ROLE: i32 = 256 + 1;
@@ -66,11 +58,19 @@ const HIDDEN_ROLE: i32 = 256 + 8;
 // rationale as the GamesModel role; the shared delegate splits on newlines.
 const DISAMBIGUATING_TAGS_ROLE: i32 = 256 + 9;
 
-// Page size for the initial load and every cursor follow-up. Core caps
-// `maxResults` at 100; search rows are tiny (one tile + one caption per
+// Page size for the initial load and every cursor follow-up. Core defaults
+// `maxResults` to 100 when the field is absent and validates it at 1000
+// (`max=1000` on SearchParams.MaxResults); note it REJECTS an over-cap value
+// rather than clamping. Search rows are tiny (one tile + one caption per
 // row) so 25 fills several screens of the favorites grid without
 // stressing the over-the-wire payload.
 const PAGE_SIZE: u32 = 25;
+
+/// Config/QML sort mode for A-Z. Core receives `name-asc`; `frontend.toml`
+/// keeps the shorter token used by the menu contract.
+const SORT_NAME: &str = "name";
+const CORE_SORT_NAME_ASC: &str = "name-asc";
+const RANDOM_FAVORITE_SCRIPT: &str = "**launch.random:all?tags=user:favorite";
 // How many rows ahead/behind the settled cursor to warm in list-detail
 // layout. Kept small so the 2-worker byte queue stays shallow and the next
 // cover is fetched first within ~250 ms.
@@ -85,21 +85,23 @@ const COVER_PREFETCH_CURSOR_PREV: i32 = 2;
               avoids"
 )]
 pub struct FavoritesModelRust {
+    // Core-ordered, cursor-paged rows. Sorting stays server-side so this model
+    // never has to materialize the full Favorites set.
     entries: Vec<MediaItem>,
-    // Parallel to `entries`: the sibling-diffed disambiguation display per row
-    // (see `compute_favorites_disambig_displays`). Recomputed on load/append and
-    // when `show_original_filenames` changes.
+    // Parallel to `entries`: sibling-diffed disambiguation display per row.
     disambig_displays: Vec<String>,
+    // "" = Core's established order, "name" = Core `name-asc`.
+    sort_mode: QString,
     count: i32,
-    total_items: i32,
     loading: bool,
     loading_more: bool,
-    current_system_id: QString,
     error_message: QString,
     has_next_page: bool,
     next_cursor: Option<String>,
     card_write_pending: bool,
     card_write_error: QString,
+    random_error: QString,
+    random_seq: Arc<AtomicU64>,
     current_detail_loading: bool,
     current_detail_tags: QString,
     current_detail_image_key: QString,
@@ -114,8 +116,6 @@ pub struct FavoritesModelRust {
     // is active (cleared on reset or out-of-range).
     detail_prefetch_row: Option<i32>,
     cover_requests_paused: bool,
-    visible_first_row: i32,
-    visible_row_count: i32,
     // Mirrors the global `Show original filenames` setting; when true the
     // `name` role and `name_at()` return the original filename (sans
     // extension). Bound from QML; flipping re-emits `dataChanged(NAME_ROLE)`.
@@ -124,9 +124,12 @@ pub struct FavoritesModelRust {
     current_detail_media_id: Option<i64>,
     card_write_seq: Arc<AtomicU64>,
     detail_seq: Arc<AtomicU64>,
-    // Bumped whenever the cursor chain is reset by an initial
-    // `apply_state` so any in-flight `fetch_more` callback can detect
-    // its append no longer belongs to the current chain.
+    // Current endpoint watcher. Replaced when sort scope changes.
+    watcher: Option<JoinHandle<()>>,
+    // Disarms watcher callbacks already queued when sort scope changes.
+    scope_seq: Arc<AtomicU64>,
+    // Bumped whenever the cursor chain resets so any in-flight `fetch_more`
+    // callback can detect its append no longer belongs to the current chain.
     seq: Arc<AtomicU64>,
     // Long-lived bridge from `media_image_cache` broadcast updates
     // onto `dataChanged(coverKey)` emits for matching rows. Spun up
@@ -157,16 +160,17 @@ impl Default for FavoritesModelRust {
         Self {
             entries: Vec::new(),
             disambig_displays: Vec::new(),
+            sort_mode: QString::default(),
             count: 0,
-            total_items: -1,
             loading: false,
             loading_more: false,
-            current_system_id: QString::default(),
             error_message: QString::default(),
             has_next_page: false,
             next_cursor: None,
             card_write_pending: false,
             card_write_error: QString::default(),
+            random_error: QString::default(),
+            random_seq: Arc::new(AtomicU64::new(0)),
             current_detail_loading: false,
             current_detail_tags: QString::default(),
             current_detail_image_key: QString::default(),
@@ -174,13 +178,13 @@ impl Default for FavoritesModelRust {
             detail_prefetch_key_prev: QString::default(),
             detail_prefetch_row: None,
             cover_requests_paused: true,
-            visible_first_row: 0,
-            visible_row_count: 0,
             show_original_filenames: false,
             current_detail_media_key: None,
             current_detail_media_id: None,
             card_write_seq: Arc::new(AtomicU64::new(0)),
             detail_seq: Arc::new(AtomicU64::new(0)),
+            watcher: None,
+            scope_seq: Arc::new(AtomicU64::new(0)),
             seq: Arc::new(AtomicU64::new(0)),
             cover_subscription: None,
             pending_first_paint_keys: HashSet::new(),
@@ -213,14 +217,13 @@ pub mod ffi {
         #[qml_element]
         #[qml_singleton]
         #[qproperty(i32, count)]
-        #[qproperty(i32, total_items)]
         #[qproperty(bool, loading)]
         #[qproperty(bool, loading_more)]
-        #[qproperty(QString, current_system_id, READ, WRITE = set_current_system_id, NOTIFY)]
         #[qproperty(QString, error_message)]
         #[qproperty(bool, has_next_page)]
         #[qproperty(bool, card_write_pending)]
         #[qproperty(QString, card_write_error)]
+        #[qproperty(QString, random_error)]
         #[qproperty(bool, current_detail_loading)]
         #[qproperty(QString, current_detail_tags)]
         #[qproperty(QString, current_detail_image_key)]
@@ -228,19 +231,26 @@ pub mod ffi {
         #[qproperty(QString, detail_prefetch_key_prev)]
         #[qproperty(bool, cover_requests_paused)]
         #[qproperty(bool, show_original_filenames, READ, WRITE = set_show_original_filenames, NOTIFY)]
+        #[qproperty(QString, sort_mode, READ, WRITE = set_sort_mode, NOTIFY)]
         type FavoritesModel = super::FavoritesModelRust;
 
         #[qinvokable]
         fn fetch_more(self: Pin<&mut FavoritesModel>);
 
         #[qinvokable]
-        fn set_system(self: Pin<&mut FavoritesModel>, system_id: QString);
+        fn set_sort_mode(self: Pin<&mut FavoritesModel>, value: &QString);
 
         #[qinvokable]
         fn launch_at(self: Pin<&mut FavoritesModel>, index: i32);
 
         #[qinvokable]
         fn launch_text_at(self: &FavoritesModel, index: i32) -> QString;
+
+        #[qinvokable]
+        fn launch_random(self: Pin<&mut FavoritesModel>);
+
+        #[qinvokable]
+        fn clear_random_error(self: Pin<&mut FavoritesModel>);
 
         #[qinvokable]
         fn write_card_at(self: Pin<&mut FavoritesModel>, index: i32);
@@ -256,9 +266,6 @@ pub mod ffi {
 
         #[qinvokable]
         fn set_show_original_filenames(self: Pin<&mut FavoritesModel>, value: bool);
-
-        #[qinvokable]
-        fn set_current_system_id(self: Pin<&mut FavoritesModel>, value: QString);
 
         #[qinvokable]
         fn name_at(self: &FavoritesModel, index: i32) -> QString;
@@ -341,18 +348,25 @@ pub mod ffi {
     impl cxx_qt::Initialize for FavoritesModel {}
 }
 
-crate::bind_to_endpoint! {
-    for ffi::FavoritesModel,
-    endpoint = MediaFavoritesEndpoint,
-    args = FavoritesArgs::new(PAGE_SIZE),
-    select = project,
-    apply = apply_state,
+impl cxx_qt::Initialize for ffi::FavoritesModel {
+    fn initialize(mut self: Pin<&mut Self>) {
+        let configured = load_config(&config_file_path())
+            .settings
+            .favorites_sort
+            .unwrap_or_default();
+        let normalized = normalize_sort_mode(&configured).unwrap_or_else(|| {
+            warn!("ignoring unknown configured favorites sort mode: {configured}");
+            ""
+        });
+        self.as_mut().rust_mut().sort_mode = QString::from(normalized);
+        self.start_subscription();
+    }
 }
 
 /// Snapshot of a single page that `apply_state` can write onto the
 /// model. Carried by value so the closure is `Send + 'static` for the
 /// `qt_thread` queue.
-type PageSnapshot = (Vec<MediaItem>, bool, Option<String>, i64);
+type PageSnapshot = (Vec<MediaItem>, bool, Option<String>);
 
 /// Project the resource status onto an `(Option<PageSnapshot>, error)`
 /// tuple. `Idle`/`Loading` map to the same `(None, "")` shape so the
@@ -364,7 +378,6 @@ fn project(status: &ResourceStatus<MediaSearchResult>) -> (Option<PageSnapshot>,
                 data.results.clone(),
                 data.has_next_page(),
                 data.next_cursor(),
-                data.total,
             )),
             String::new(),
         ),
@@ -373,32 +386,12 @@ fn project(status: &ResourceStatus<MediaSearchResult>) -> (Option<PageSnapshot>,
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    clippy::cognitive_complexity,
-    reason = "the branches are long but the logic is straightforward and linear"
-)]
 fn apply_state(
     mut model: Pin<&mut ffi::FavoritesModel>,
     (data, err): (Option<PageSnapshot>, String),
 ) {
     let apply_started = Instant::now();
-    if let Some((entries, has_next_page, next_cursor, total)) = data {
-        let system_id = model.current_system_id.to_string();
-        let raw_count = entries.len();
-        let entries = filter_favorites_for_system(entries, &system_id);
-        let filtered_count = entries.len();
-
-        if !system_id.is_empty() && raw_count > 0 && filtered_count == 0 {
-            info!(
-                current_system_id = %system_id,
-                raw_count,
-                filtered_count,
-                "favorites: ignoring global favorites seed update while scoped to a system",
-            );
-            return;
-        }
-
+    if let Some((entries, has_next_page, next_cursor)) = data {
         if model.nav_timing.is_none() {
             model.as_mut().rust_mut().nav_timing = Some(NavTiming::new("cache"));
         }
@@ -412,30 +405,23 @@ fn apply_state(
         if !model.cover_requests_paused {
             enqueue_favorites_covers(&entries);
         }
-        let count = i32::try_from(entries.len()).unwrap_or(i32::MAX);
-        let total_items = if total < 0 {
-            -1
-        } else {
-            i32::try_from(total).unwrap_or(i32::MAX)
-        };
         clear_current_detail_state(model.as_mut());
+        let count = i32::try_from(entries.len()).unwrap_or(i32::MAX);
         let displays = compute_favorites_disambig_displays(&entries, model.show_original_filenames);
         model.as_mut().begin_reset_model();
-        model.as_mut().rust_mut().entries = entries;
-        model.as_mut().rust_mut().disambig_displays = displays;
-        model.as_mut().rust_mut().count = count;
-        model.as_mut().set_total_items(total_items);
-        model.as_mut().rust_mut().next_cursor = next_cursor;
+        {
+            let mut rust = model.as_mut().rust_mut();
+            rust.entries = entries;
+            rust.disambig_displays = displays;
+            rust.count = count;
+            rust.next_cursor = next_cursor;
+        }
         model.as_mut().end_reset_model();
         model.as_mut().count_changed();
         if let Some(timing) = model.as_mut().rust_mut().nav_timing.as_mut() {
             timing.mark_apply_done();
         }
         info!(
-            current_system_id = %system_id,
-            raw_count,
-            filtered_count,
-            has_next_page,
             apply_ms = apply_started.elapsed().as_millis(),
             "favorites: apply_state timing",
         );
@@ -462,18 +448,11 @@ fn apply_state(
             model.as_mut().set_loading_more(false);
         }
         // Look-ahead prefetch: warm page 2 so the first scroll past the
-        // initial page doesn't surface a "Loading more…" cue. `fetch_more`
-        // is itself guarded by `has_next_page` and `loading_more`.
+        // initial page doesn't surface a "Loading more…" cue.
         if has_next_page && !model.cover_requests_paused {
             model.as_mut().fetch_more();
         }
     } else if err.is_empty() {
-        info!(
-            current_system_id = %model.current_system_id.to_string(),
-            loading = model.loading,
-            count = model.count,
-            "favorites: apply_state pending"
-        );
         if model.nav_timing.is_none() {
             model.as_mut().rust_mut().nav_timing = Some(NavTiming::new("network"));
         } else if let Some(timing) = model.as_mut().rust_mut().nav_timing.as_mut() {
@@ -491,6 +470,9 @@ fn apply_state(
         clear_current_detail_state(model.as_mut());
         model.as_mut().rust_mut().seq.fetch_add(1, Ordering::SeqCst);
         model.as_mut().rust_mut().next_cursor = None;
+        if model.loading_more {
+            model.as_mut().set_loading_more(false);
+        }
         if !model.loading {
             model.as_mut().set_loading(true);
         }
@@ -498,12 +480,6 @@ fn apply_state(
             model.as_mut().set_has_next_page(false);
         }
     } else {
-        warn!(
-            current_system_id = %model.current_system_id.to_string(),
-            error = %err,
-            count = model.count,
-            "favorites: apply_state error"
-        );
         // Same disarm as the Pending branch — an Errored transition
         // doesn't reset entries, so a callback queued during the prior
         // Ready could otherwise append rows that don't belong to the
@@ -512,6 +488,9 @@ fn apply_state(
         clear_current_detail_state(model.as_mut());
         model.as_mut().rust_mut().seq.fetch_add(1, Ordering::SeqCst);
         model.as_mut().rust_mut().next_cursor = None;
+        if model.loading_more {
+            model.as_mut().set_loading_more(false);
+        }
         if model.loading {
             model.as_mut().set_loading(false);
         }
@@ -527,14 +506,6 @@ fn apply_state(
 }
 
 impl ffi::FavoritesModel {
-    fn set_current_system_id(mut self: Pin<&mut Self>, value: QString) {
-        if self.current_system_id == value {
-            return;
-        }
-        self.as_mut().rust_mut().current_system_id = value;
-        self.as_mut().current_system_id_changed();
-    }
-
     fn row_count(&self, parent: &QModelIndex) -> i32 {
         if parent.is_valid() {
             0
@@ -543,11 +514,67 @@ impl ffi::FavoritesModel {
         }
     }
 
+    fn entry_at(&self, row: i32) -> Option<&MediaItem> {
+        let row = usize::try_from(row).ok()?;
+        self.entries.get(row)
+    }
+
+    /// Subscribe to page 1 for current sort scope. Replacing sort aborts prior
+    /// watcher and invalidates callbacks already queued onto Qt thread.
+    fn start_subscription(mut self: Pin<&mut Self>) {
+        if let Some(handle) = self.as_mut().rust_mut().watcher.take() {
+            handle.abort();
+        }
+        let sort = core_sort_for_mode(&self.sort_mode.to_string());
+        let resource =
+            global_store().subscribe::<MediaFavoritesEndpoint>(FavoritesArgs::new(PAGE_SIZE, sort));
+        let mut status_rx = resource.subscribe();
+        let snapshot = status_rx.borrow_and_update().clone();
+        let scope_seq = self.rust().scope_seq.clone();
+        let ticket = scope_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let qt_thread = self.qt_thread();
+        let scope_seq_for_loop = scope_seq.clone();
+        let handle = global_handle().spawn(async move {
+            while status_rx.changed().await.is_ok() {
+                let projected = project(&status_rx.borrow_and_update());
+                let scope_seq = scope_seq_for_loop.clone();
+                let _ = qt_thread.queue(move |model| {
+                    if scope_seq.load(Ordering::SeqCst) == ticket {
+                        apply_state(model, projected);
+                    }
+                });
+            }
+        });
+        self.as_mut().rust_mut().watcher = Some(handle);
+        apply_state(self.as_mut(), project(&snapshot));
+    }
+
+    /// Set server-side row order. `""` restores Core's established order;
+    /// `"name"` maps to `media.search.sort = "name-asc"`.
+    fn set_sort_mode(mut self: Pin<&mut Self>, value: &QString) {
+        let requested = value.to_string();
+        let Some(normalized) = normalize_sort_mode(&requested) else {
+            warn!("ignoring unknown favorites sort mode: {requested}");
+            return;
+        };
+        if self.sort_mode.to_string() == normalized {
+            return;
+        }
+        if let Err(error) = save_favorites_sort(&config_file_path(), normalized) {
+            warn!("could not persist favorites sort: {error}");
+        }
+        self.as_mut().rust_mut().sort_mode = QString::from(normalized);
+        self.as_mut().sort_mode_changed();
+        self.start_subscription();
+    }
+
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
         if !index.is_valid() || index.row() < 0 || index.row() >= self.count {
             return QVariant::default();
         }
-        let entry = &self.entries[index.row() as usize];
+        let Some(entry) = self.entry_at(index.row()) else {
+            return QVariant::default();
+        };
         match role {
             NAME_ROLE => QVariant::from(&QString::from(
                 display_name(&entry.name, &entry.path, self.show_original_filenames).as_str(),
@@ -599,7 +626,7 @@ impl ffi::FavoritesModel {
         let seq = self.rust().seq.clone();
         let ticket = seq.load(Ordering::SeqCst);
         self.as_mut().set_loading_more(true);
-        let system_id = self.current_system_id.to_string();
+        let sort = core_sort_for_mode(&self.sort_mode.to_string());
         let qt_thread = self.qt_thread();
         let store = global_store();
         global_handle().spawn(async move {
@@ -608,12 +635,8 @@ impl ffi::FavoritesModel {
                 .media_search(MediaSearchParams {
                     max_results: Some(PAGE_SIZE),
                     cursor,
-                    systems: if system_id.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![system_id]
-                    },
                     tags: vec!["user:favorite".into()],
+                    sort,
                     ..MediaSearchParams::default()
                 })
                 .await;
@@ -626,108 +649,7 @@ impl ffi::FavoritesModel {
         });
     }
 
-    fn set_system(mut self: Pin<&mut Self>, system_id: QString) {
-        let previous_system_id = self.current_system_id.to_string();
-        let next_system_id = system_id.to_string();
-        info!(
-            previous_system_id = %previous_system_id,
-            next_system_id = %next_system_id,
-            count = self.count,
-            loading = self.loading,
-            "favorites: set_system requested"
-        );
-        if self.current_system_id == system_id {
-            info!(
-                current_system_id = %previous_system_id,
-                "favorites: set_system skipped (unchanged)"
-            );
-            return;
-        }
-        self.as_mut().set_current_system_id(system_id);
-
-        self.as_mut().rust_mut().seq.fetch_add(1, Ordering::SeqCst);
-        self.as_mut().set_loading(true);
-        self.as_mut().set_loading_more(false);
-        self.as_mut().set_error_message(QString::default());
-        self.as_mut().set_has_next_page(false);
-        self.as_mut().set_total_items(-1);
-        self.as_mut().rust_mut().next_cursor = None;
-        clear_current_detail_state(self.as_mut());
-        if !self.entries.is_empty() {
-            self.as_mut().begin_reset_model();
-            self.as_mut().rust_mut().entries.clear();
-            self.as_mut().rust_mut().disambig_displays.clear();
-            self.as_mut().rust_mut().count = 0;
-            self.as_mut().end_reset_model();
-            self.as_mut().count_changed();
-        }
-
-        let system_id = self.current_system_id.to_string();
-        let qt_thread = self.qt_thread();
-        let store = global_store();
-        let seq = self.rust().seq.clone();
-        let ticket = seq.load(Ordering::SeqCst);
-        global_handle().spawn(async move {
-            let result = store
-                .client()
-                .media_search(MediaSearchParams {
-                    max_results: Some(PAGE_SIZE),
-                    systems: if system_id.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![system_id]
-                    },
-                    tags: vec!["user:favorite".into()],
-                    ..MediaSearchParams::default()
-                })
-                .await;
-            let _ = qt_thread.queue(move |mut model| {
-                if seq.load(Ordering::SeqCst) != ticket {
-                    info!("favorites: set_system result dropped due to stale ticket");
-                    return;
-                }
-                match result {
-                    Ok(result) => {
-                        let current_system_id = model.current_system_id.to_string();
-                        let has_next_page = result.has_next_page();
-                        let next_cursor = result.next_cursor();
-                        let raw_count = result.results.len();
-                        let filtered_results =
-                            filter_favorites_for_system(result.results, &current_system_id);
-                        info!(
-                            current_system_id = %current_system_id,
-                            raw_count,
-                            filtered_count = filtered_results.len(),
-                            has_next_page,
-                            "favorites: set_system result ready"
-                        );
-                        apply_state(
-                            model.as_mut(),
-                            (
-                                Some((filtered_results, has_next_page, next_cursor, result.total)),
-                                String::new(),
-                            ),
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            current_system_id = %model.current_system_id.to_string(),
-                            error = %e.message,
-                            "favorites: set_system request failed"
-                        );
-                        model
-                            .as_mut()
-                            .set_error_message(QString::from(e.message.as_str()));
-                        model.as_mut().set_loading(false);
-                    }
-                }
-            });
-        });
-    }
-
     fn refresh_cover_keys(mut self: Pin<&mut Self>, first_row: i32, count: i32) {
-        self.as_mut().rust_mut().visible_first_row = first_row;
-        self.as_mut().rust_mut().visible_row_count = count;
         emit_cover_key_range(self.as_mut(), first_row, count);
     }
 
@@ -736,10 +658,9 @@ impl ffi::FavoritesModel {
     }
 
     fn launch_at(self: Pin<&mut Self>, index: i32) {
-        if index < 0 || index >= self.count {
+        let Some(entry) = self.entry_at(index) else {
             return;
-        }
-        let entry = &self.entries[index as usize];
+        };
         let text = launch_text_for(entry);
         if text.is_empty() {
             return;
@@ -754,20 +675,54 @@ impl ffi::FavoritesModel {
     }
 
     fn launch_text_at(&self, index: i32) -> QString {
-        if index < 0 || index >= self.count {
+        let Some(entry) = self.entry_at(index) else {
             return QString::default();
+        };
+        QString::from(portable_text_for_entry(entry).as_str())
+    }
+
+    /// Ask Core to choose uniformly from all media carrying favorite tag.
+    fn launch_random(mut self: Pin<&mut Self>) {
+        if !self.random_error.is_empty() {
+            self.as_mut().set_random_error(QString::default());
         }
-        QString::from(portable_text_for_entry(&self.entries[index as usize]).as_str())
+        let seq = self.rust().random_seq.clone();
+        let ticket = seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let qt_thread = self.qt_thread();
+        let store = global_store();
+        global_handle().spawn(async move {
+            let result = store
+                .run_mutation::<RunMutation>(RunParams {
+                    text: RANDOM_FAVORITE_SCRIPT.to_string(),
+                })
+                .await;
+            let _ = qt_thread.queue(move |mut model| {
+                if seq.load(Ordering::SeqCst) != ticket {
+                    return;
+                }
+                if let Err(error) = result {
+                    warn!("Core random favorite launch failed: {}", error.message);
+                    model
+                        .as_mut()
+                        .set_random_error(QString::from(error.message.as_str()));
+                }
+            });
+        });
+    }
+
+    fn clear_random_error(mut self: Pin<&mut Self>) {
+        if !self.random_error.is_empty() {
+            self.as_mut().set_random_error(QString::default());
+        }
     }
 
     fn write_card_at(mut self: Pin<&mut Self>, index: i32) {
-        if index < 0 || index >= self.count {
+        let Some(entry) = self.entry_at(index) else {
             self.as_mut()
                 .set_card_write_error(QString::from("invalid selection"));
             self.as_mut().set_card_write_pending(false);
             return;
-        }
-        let entry = &self.entries[index as usize];
+        };
         let text = portable_text_for_entry(entry);
         if text.is_empty() {
             self.as_mut()
@@ -804,10 +759,12 @@ impl ffi::FavoritesModel {
     }
 
     fn toggle_favorite_at(self: Pin<&mut Self>, index: i32) {
-        if index < 0 || index >= self.count {
+        let Ok(entry_index) = usize::try_from(index) else {
             return;
-        }
-        let entry = &self.entries[index as usize];
+        };
+        let Some(entry) = self.entries.get(entry_index) else {
+            return;
+        };
         let Some(params) = favorite_params_for_entry(entry, !has_favorite_tag(&entry.tags)) else {
             warn!(
                 "favorite update skipped: missing media identity for {}",
@@ -824,11 +781,10 @@ impl ffi::FavoritesModel {
         global_handle().spawn(async move {
             match store.run_mutation::<MediaTagsUpdateMutation>(params).await {
                 Ok(result) => {
-                    store.subscribe::<SystemsFavoritesEndpoint>(()).refetch();
                     let _ = qt_thread.queue(move |mut model| {
                         apply_favorite_tags(
                             model.as_mut(),
-                            index,
+                            entry_index,
                             media_id,
                             &system_id,
                             &path,
@@ -842,10 +798,8 @@ impl ffi::FavoritesModel {
     }
 
     fn is_favorite_at(&self, index: i32) -> bool {
-        if index < 0 || index >= self.count {
-            return false;
-        }
-        has_favorite_tag(&self.entries[index as usize].tags)
+        self.entry_at(index)
+            .is_some_and(|entry| has_favorite_tag(&entry.tags))
     }
 
     fn cancel_card_write(mut self: Pin<&mut Self>) {
@@ -862,20 +816,19 @@ impl ffi::FavoritesModel {
     }
 
     fn name_at(&self, index: i32) -> QString {
-        if index < 0 || index >= self.count {
+        let Some(entry) = self.entry_at(index) else {
             return QString::default();
-        }
-        let entry = &self.entries[index as usize];
+        };
         QString::from(display_name(&entry.name, &entry.path, self.show_original_filenames).as_str())
     }
 
     // Full (untrimmed) disambiguation tokens for the focused-item readout.
     fn disambiguating_tags_at(&self, index: i32) -> QString {
-        if index < 0 || index >= self.count {
+        let Some(entry) = self.entry_at(index) else {
             return QString::default();
-        }
+        };
         QString::from(
-            disambiguating_tag_labels(&self.entries[index as usize].disambiguating_tags)
+            disambiguating_tag_labels(&entry.disambiguating_tags)
                 .join(" ")
                 .as_str(),
         )
@@ -887,7 +840,8 @@ impl ffi::FavoritesModel {
         }
         self.as_mut().rust_mut().show_original_filenames = value;
         self.as_mut().show_original_filenames_changed();
-        // Displayed name drives sibling grouping, so recompute the trimmed tags.
+        // Displayed name drives sibling grouping, so recompute trimmed tags.
+        // Core order remains authoritative even when original filenames show.
         let displays = compute_favorites_disambig_displays(&self.entries, value);
         self.as_mut().rust_mut().disambig_displays = displays;
         let last_row = self.count - 1;
@@ -903,17 +857,17 @@ impl ffi::FavoritesModel {
     }
 
     fn path_at(&self, index: i32) -> QString {
-        if index < 0 || index >= self.count {
+        let Some(entry) = self.entry_at(index) else {
             return QString::default();
-        }
-        QString::from(self.entries[index as usize].path.as_str())
+        };
+        QString::from(entry.path.as_str())
     }
 
     fn system_id_at(&self, index: i32) -> QString {
-        if index < 0 || index >= self.count {
+        let Some(entry) = self.entry_at(index) else {
             return QString::default();
-        }
-        QString::from(self.entries[index as usize].system.id.as_str())
+        };
+        QString::from(entry.system.id.as_str())
     }
 
     // Immediate, non-debounced sibling of `load_detail_at`. Called the moment
@@ -933,7 +887,10 @@ impl ffi::FavoritesModel {
         }
         self.as_mut().rust_mut().detail_prefetch_row = Some(index);
         prefetch_around_cursor(&self.entries, self.count, index, self.cover_requests_paused);
-        let entry = &self.entries[index as usize];
+        let Some(entry) = self.entry_at(index) else {
+            clear_current_detail_state(self.as_mut());
+            return;
+        };
         let system = entry.system.id.clone();
         let path = entry.path.clone();
         if system.trim().is_empty() || path.trim().is_empty() {
@@ -985,7 +942,10 @@ impl ffi::FavoritesModel {
         // Re-center the byte-fetch queue on the current row so it and
         // its neighbors are fetched ahead of the stale list backlog.
         prefetch_around_cursor(&self.entries, self.count, index, self.cover_requests_paused);
-        let entry = &self.entries[index as usize];
+        let Some(entry) = self.entry_at(index) else {
+            clear_current_detail_state(self.as_mut());
+            return;
+        };
         let system = entry.system.id.clone();
         let path = entry.path.clone();
         let media_id = entry.media_id;
@@ -1210,6 +1170,7 @@ fn detail_tags_from_meta(meta: &MediaMeta) -> String {
 // Warm the metadata cache for the rows immediately around `row` so a move to
 // a neighbor is a synchronous cache hit. Best-effort and fire-and-forget;
 // already-cached or in-flight keys are skipped inside the cache.
+/// Warm metadata for rows either side of cursor in Core-provided order.
 fn enqueue_meta_prefetch(entries: &[MediaItem], count: i32, row: i32) {
     let mut requests = Vec::new();
     for delta in [-2_i32, -1, 1, 2] {
@@ -1217,7 +1178,9 @@ fn enqueue_meta_prefetch(entries: &[MediaItem], count: i32, row: i32) {
         if i < 0 || i >= count {
             continue;
         }
-        let entry = &entries[i as usize];
+        let Some(entry) = usize::try_from(i).ok().and_then(|r| entries.get(r)) else {
+            continue;
+        };
         let system = entry.system.id.clone();
         let path = entry.path.clone();
         if system.trim().is_empty() || path.trim().is_empty() {
@@ -1272,9 +1235,7 @@ fn display_name(name: &str, path: &str, show_original_filenames: bool) -> String
     }
 }
 
-/// Sibling-diffed disambiguation displays for the full `entries` slice (see the
-/// shared `sibling_disambiguation_displays`). Grouping keys off the displayed
-/// name so the original-filename toggle disables grouping naturally.
+/// Sibling-diffed disambiguation displays in Core-provided row order.
 fn compute_favorites_disambig_displays(entries: &[MediaItem], show_original: bool) -> Vec<String> {
     let rows: Vec<(String, Vec<String>)> = entries
         .iter()
@@ -1286,6 +1247,18 @@ fn compute_favorites_disambig_displays(entries: &[MediaItem], show_original: boo
         })
         .collect();
     sibling_disambiguation_displays(&rows)
+}
+
+fn normalize_sort_mode(value: &str) -> Option<&str> {
+    match value {
+        "" => Some(""),
+        SORT_NAME => Some(SORT_NAME),
+        _ => None,
+    }
+}
+
+fn core_sort_for_mode(value: &str) -> Option<String> {
+    (value == SORT_NAME).then(|| CORE_SORT_NAME_ASC.to_string())
 }
 
 /// Recompute disambiguation displays for the boundary group + appended rows
@@ -1447,18 +1420,18 @@ fn favorite_params_for_entry(entry: &MediaItem, add: bool) -> Option<MediaTagsUp
     Some(params)
 }
 
+/// Write Core's updated tag list back onto targeted row.
 fn apply_favorite_tags(
     mut model: Pin<&mut ffi::FavoritesModel>,
-    index: i32,
+    entry_index: usize,
     media_id: Option<i64>,
     system_id: &str,
     path: &str,
     tags: Vec<TagInfo>,
 ) {
-    if index < 0 || index >= model.count {
+    let Some(entry) = model.entries.get(entry_index) else {
         return;
-    }
-    let entry = &model.entries[index as usize];
+    };
     let same_entry = if media_id.is_some() {
         entry.media_id == media_id
     } else {
@@ -1467,11 +1440,14 @@ fn apply_favorite_tags(
     if !same_entry {
         return;
     }
-    model.as_mut().rust_mut().entries[index as usize].tags = tags;
+    model.as_mut().rust_mut().entries[entry_index].tags = tags;
+    let Ok(row) = i32::try_from(entry_index) else {
+        return;
+    };
     let mut roles = QList::<i32>::default();
     roles.append(FAVORITE_ROLE);
     let parent = QModelIndex::default();
-    let idx = model.index(index, 0, &parent);
+    let idx = model.index(row, 0, &parent);
     model.as_mut().data_changed(&idx, &idx, &roles);
 }
 
@@ -1535,17 +1511,19 @@ fn prefetch_around_cursor(entries: &[MediaItem], count: i32, row: i32, requests_
     let fwd_end = (row + 1 + COVER_PREFETCH_CURSOR_NEXT).min(count);
     let back_start = (row - COVER_PREFETCH_CURSOR_PREV).max(0);
     let mut plan: Vec<(MediaKey, Option<i64>)> = Vec::new();
-    for i in row..fwd_end {
-        let e = &entries[i as usize];
+    let push_row = |i: i32, plan: &mut Vec<(MediaKey, Option<i64>)>| {
+        let Some(e) = usize::try_from(i).ok().and_then(|row| entries.get(row)) else {
+            return;
+        };
         if let Some(key) = media_key_for(e).map(MediaKey::with_current_cover_preference) {
             plan.push((key, e.media_id));
         }
+    };
+    for i in row..fwd_end {
+        push_row(i, &mut plan);
     }
     for i in (back_start..row).rev() {
-        let e = &entries[i as usize];
-        if let Some(key) = media_key_for(e).map(MediaKey::with_current_cover_preference) {
-            plan.push((key, e.media_id));
-        }
+        push_row(i, &mut plan);
     }
     cache.replace_pending_requests_ordered(plan, PAGE_SIZE);
 }
@@ -1669,18 +1647,6 @@ where
         .collect()
 }
 
-fn visible_entries(entries: &[MediaItem], first_row: i32, count: i32) -> &[MediaItem] {
-    if count <= 0 {
-        return entries;
-    }
-    let first = first_row.max(0) as usize;
-    if first >= entries.len() {
-        return &entries[0..0];
-    }
-    let last = (first + count as usize).min(entries.len());
-    &entries[first..last]
-}
-
 /// Decide whether to hold `loading=true` until the page's covers are
 /// cached, or release immediately. Called once per Ready `apply_state`.
 ///
@@ -1696,19 +1662,15 @@ fn arm_cover_gate(mut model: Pin<&mut ffi::FavoritesModel>) {
         handle.abort();
     }
     let cache = global_media_image_cache();
-    let entries = visible_entries(
-        &model.entries,
-        model.visible_first_row,
-        model.visible_row_count,
-    );
-    let cover_keys = entries
+    let visible = &model.entries;
+    let cover_keys = visible
         .iter()
         .filter_map(|entry| media_key_for(entry).map(MediaKey::with_current_cover_preference))
         .collect::<Vec<_>>();
     let cover_total = cover_keys.len();
     let cover_cache_hits = cover_keys.iter().filter(|k| cache.is_cached(k)).count();
     let unresolved = compute_unresolved_keys(
-        entries,
+        visible,
         |k| cache.is_cached(k),
         |k| cache.is_negative(k) || cache.is_soft_no_image(k),
     );
@@ -1795,16 +1757,6 @@ fn position_of_path(entries: &[MediaItem], needle: &str) -> i32 {
         .map_or(-1, |i| i as i32)
 }
 
-fn filter_favorites_for_system(entries: Vec<MediaItem>, system_id: &str) -> Vec<MediaItem> {
-    if system_id.is_empty() {
-        return entries;
-    }
-    entries
-        .into_iter()
-        .filter(|entry| entry.system.id == system_id)
-        .collect()
-}
-
 fn apply_append_page(
     mut model: Pin<&mut ffi::FavoritesModel>,
     result: Result<MediaSearchResult, ClientError>,
@@ -1818,25 +1770,18 @@ fn apply_append_page(
     }
     match result {
         Ok(result) => {
-            let system_id = model.current_system_id.to_string();
             let has_next_page = result.has_next_page();
             let next_cursor = result.next_cursor();
-            let total_items = if result.total < 0 {
-                -1
-            } else {
-                i32::try_from(result.total).unwrap_or(i32::MAX)
-            };
-            let filtered_results = filter_favorites_for_system(result.results, &system_id);
-            let new_count = i32::try_from(filtered_results.len()).unwrap_or(i32::MAX - model.count);
+            let new_count = i32::try_from(result.results.len()).unwrap_or(i32::MAX - model.count);
             if !model.cover_requests_paused {
-                enqueue_favorites_covers(&filtered_results);
+                enqueue_favorites_covers(&result.results);
             }
             if new_count > 0 {
                 let first = model.count;
                 let last = first.saturating_add(new_count).saturating_sub(1);
                 let parent = QModelIndex::default();
                 model.as_mut().begin_insert_rows(&parent, first, last);
-                model.as_mut().rust_mut().entries.extend(filtered_results);
+                model.as_mut().rust_mut().entries.extend(result.results);
                 model.as_mut().rust_mut().count = first.saturating_add(new_count);
                 let group_start = recompute_favorites_disambig_tail(model.as_mut(), first as usize);
                 model.as_mut().end_insert_rows();
@@ -1854,7 +1799,6 @@ fn apply_append_page(
                 }
             }
             model.as_mut().rust_mut().next_cursor = next_cursor;
-            model.as_mut().set_total_items(total_items);
             model.as_mut().set_has_next_page(has_next_page);
             model.as_mut().set_loading_more(false);
         }
@@ -1882,6 +1826,26 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn random_favorite_uses_core_tag_scope() {
+        assert_eq!(
+            RANDOM_FAVORITE_SCRIPT,
+            "**launch.random:all?tags=user:favorite"
+        );
+    }
+
+    #[test]
+    fn sort_mode_maps_to_core_contract() {
+        assert_eq!(normalize_sort_mode(""), Some(""));
+        assert_eq!(normalize_sort_mode(SORT_NAME), Some(SORT_NAME));
+        assert_eq!(normalize_sort_mode("filename"), None);
+        assert_eq!(core_sort_for_mode(""), None);
+        assert_eq!(
+            core_sort_for_mode(SORT_NAME),
+            Some(CORE_SORT_NAME_ASC.to_string())
+        );
     }
 
     #[test]
@@ -1922,26 +1886,5 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(unresolved, expected);
-    }
-
-    #[test]
-    fn visible_entries_slices_to_range() {
-        let entries = vec![
-            favorite_entry(),
-            favorite_entry(),
-            favorite_entry(),
-            favorite_entry(),
-        ];
-        let slice = visible_entries(&entries, 1, 2);
-        assert_eq!(slice.len(), 2);
-        assert_eq!(slice[0].path, "/games/favorite.rom");
-        assert_eq!(slice[1].path, "/games/favorite.rom");
-    }
-
-    #[test]
-    fn visible_entries_out_of_range_returns_empty() {
-        let entries = vec![favorite_entry(), favorite_entry()];
-        let slice = visible_entries(&entries, 4, 2);
-        assert!(slice.is_empty());
     }
 }

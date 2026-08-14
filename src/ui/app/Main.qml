@@ -38,6 +38,10 @@ MainLayout {
     readonly property string modalQrCode: "qr_code"
     readonly property string modalCommercialNotice: "commercial_notice"
     readonly property string modalCoreVersion: "core_version_warning"
+    readonly property string modalRandomFailed: "random_failed"
+    // Sentinel id for the favorites "default order" row; maps to an empty
+    // sort mode. Must never be "" — see openFavoritesSortMenu.
+    readonly property string _favoritesSortDefault: "default"
     readonly property string modalFirstRunIndex: "first_run_index"
     readonly property string modalLogUpload: "log_upload"
     readonly property string modalQuitConfirm: "quit_confirm"
@@ -165,6 +169,19 @@ MainLayout {
         property: "screenHeight"
         value: root.scene.height
     }
+    // Keep the detail-cover tier's inputs identical to the fetch-size
+    // inputs (`_gamesDetailCoverMaxSize` below), so request tier and
+    // decode tier can never diverge.
+    Binding {
+        target: Sizing
+        property: "detailCoverViewportWidth"
+        value: root._gamesGridViewportWidth
+    }
+    Binding {
+        target: Sizing
+        property: "detailCoverViewportHeight"
+        value: root._gamesGridViewportHeight
+    }
 
     function _requestScreen(screen: string): void {
         if (screen === root.screenSystems)
@@ -174,8 +191,6 @@ MainLayout {
             root._syncGamesModelLayout();
         } else if (screen === root.screenFavorites)
             root.favoritesScreenRequested = true;
-        else if (screen === root.screenFavoriteSystems)
-            root.favoriteSystemsScreenRequested = true;
         else if (screen === root.screenRecents)
             root.recentsScreenRequested = true;
         else if (screen === root.screenSettings)
@@ -197,8 +212,6 @@ MainLayout {
             return root.gamesScreen;
         if (screen === root.screenFavorites)
             return root.favoritesScreen;
-        if (screen === root.screenFavoriteSystems)
-            return root.favoriteSystemsScreen;
         if (screen === root.screenRecents)
             return root.recentsScreen;
         if (screen === root.screenSettings)
@@ -245,6 +258,8 @@ MainLayout {
             root.commercialNoticeModalRequested = true;
         else if (modal === root.modalCoreVersion)
             root.coreVersionModalRequested = true;
+        else if (modal === root.modalRandomFailed)
+            root.randomFailedModalRequested = true;
         else if (modal === root.modalFirstRunIndex)
             root.firstRunIndexModalRequested = true;
         else if (modal === root.modalLogUpload)
@@ -533,7 +548,6 @@ MainLayout {
     property var _categoryReadyCallback: null
     property var _systemReadyCallback: null
     property var _favoritesReadyCallback: null
-    property var _favoriteSystemsReadyCallback: null
     property var _recentsReadyCallback: null
     property string _catalogWaitCategory: ""
     // Set when `_ensureCategory` arms `deferredCategorySetTimer` and
@@ -548,7 +562,6 @@ MainLayout {
     readonly property bool _systemsModelConnectionsEnabled: root.systemsScreenRequested || (root._firstFrameSeen && root._startupRestorePending) || root._categoryReadyCallback !== null || root._deferredCategoryPending || root._catalogWaitCategory !== ""
     readonly property bool _gamesModelConnectionsEnabled: root.gamesScreenRequested || root._systemReadyCallback !== null || root._deferredSystemPending
     readonly property bool _favoritesModelConnectionsEnabled: root.favoritesScreenRequested || root._favoritesReadyCallback !== null
-    readonly property bool _favoriteSystemsModelConnectionsEnabled: root.favoriteSystemsScreenRequested || root._favoriteSystemsReadyCallback !== null
     readonly property bool _recentsModelConnectionsEnabled: root.recentsScreenRequested || root._recentsReadyCallback !== null || root._pendingResumeLaunch
     // Saved games-screen entry path that wasn't on the freshly seeded
     // page 1 of MediaBrowse. The GamesModel.onCountChanged watcher
@@ -627,8 +640,6 @@ MainLayout {
         }
         if (root.pendingTransition === "favorites")
             favoritesTransitionTimer.restart();
-        else if (root.pendingTransition === "favoriteSystems")
-            favoriteSystemsTransitionTimer.restart();
         else if (root.pendingTransition === "recents")
             recentsTransitionTimer.restart();
         else if (root.pendingTransition === "settings")
@@ -724,21 +735,6 @@ MainLayout {
                 return;
             }
             root._favoritesReadyCallback = null;
-            cb();
-            root._maybeCompleteBackTransition();
-        }
-    }
-    Connections {
-        target: root._favoriteSystemsModelConnectionsEnabled ? Browse.FavoriteSystemsModel : null
-        function onLoadingChanged(): void {
-            if (Browse.FavoriteSystemsModel.loading)
-                return;
-            const cb = root._favoriteSystemsReadyCallback;
-            if (cb === null) {
-                root._maybeCompleteBackTransition();
-                return;
-            }
-            root._favoriteSystemsReadyCallback = null;
             cb();
             root._maybeCompleteBackTransition();
         }
@@ -901,13 +897,6 @@ MainLayout {
         root._completeTransition(root.screenFavorites);
     }
 
-    function _completeFavoriteSystemsTransition(): void {
-        if (root.pendingTransition !== "favoriteSystems")
-            return;
-        root.favoriteSystemsScreen.restoreSelection();
-        root._completeTransition(root.screenFavoriteSystems);
-    }
-
     function _startFavoritesTransitionLoad(): void {
         if (root.pendingTransition !== "favorites")
             return;
@@ -925,30 +914,9 @@ MainLayout {
         });
     }
 
-    function _startFavoriteSystemsTransitionLoad(): void {
-        if (root.pendingTransition !== "favoriteSystems")
-            return;
-        root._whenScreenReady(root.screenFavoriteSystems, function () {
-            if (root.pendingTransition !== "favoriteSystems")
-                return;
-            if (root._catalogStillBooting())
-                return;
-            if (!Browse.FavoriteSystemsModel.loading) {
-                root._completeFavoriteSystemsTransition();
-                return;
-            }
-            root._favoriteSystemsReadyCallback = root._completeFavoriteSystemsTransition;
-        });
-    }
-
     function _navigateToFavorites(): void {
         root.pendingTransition = "favorites";
         favoritesTransitionTimer.restart();
-    }
-
-    function _navigateToFavoriteSystems(): void {
-        root.pendingTransition = "favoriteSystems";
-        favoriteSystemsTransitionTimer.restart();
     }
 
     function _completeRecentsTransition(): void {
@@ -1368,11 +1336,7 @@ MainLayout {
         function onRequestQuit(): void {
             root.openQuitConfirmModal();
         }
-        function onRequestFavoriteSystemsScreen(): void {
-            root._navigateToFavoriteSystems();
-        }
         function onRequestFavoritesScreen(): void {
-            root.favoritesScreenSystemId = "";
             root._navigateToFavorites();
         }
         function onRequestRecentsScreen(): void {
@@ -1387,36 +1351,20 @@ MainLayout {
         function onRequestContextMenu(index: int, anchorRect): void {
             root.openContextMenu("categories", index, anchorRect);
         }
+        function onRequestActionContextMenu(actionId: string, anchorRect): void {
+            root.openHubActionContextMenu(actionId, anchorRect);
+        }
     }
     Connections {
         target: root.favoritesScreen
         function onRequestHubScreen(): void {
             root._navigateBackToScreen(root.screenHub);
         }
-        function onRequestFavoriteSystemsScreen(): void {
-            root._navigateToFavoriteSystems();
-        }
         function onRequestContextMenu(index: int, anchorRect): void {
             root.openContextMenu("favorites", index, anchorRect);
         }
         function onRequestPageMenu(): void {
-            root.openPageMenu();
-        }
-    }
-    Connections {
-        target: root.favoriteSystemsScreen
-        function onRequestHubScreen(): void {
-            root._navigateBackToScreen(root.screenHub);
-        }
-        function onRequestFavoritesScreenForSystem(systemId: string): void {
-            root.favoritesScreenSystemId = systemId;
-            root._navigateToFavorites();
-        }
-        function onRequestContextMenu(index: int, anchorRect): void {
-            root.openContextMenu("favoritesystems", index, anchorRect);
-        }
-        function onRequestPageMenu(): void {
-            root.openPageMenu();
+            root.openFavoritesPageMenu();
         }
     }
     Connections {
@@ -1598,6 +1546,11 @@ MainLayout {
             // Launch-only (virtual) systems have no media and no launcher
             // choice, so omit launcher/index/scrape actions for them.
             const launchable = Browse.SystemsModel.is_launchable_system(systemId);
+            if (!launchable)
+                entries.push({
+                    id: "launch_random_system",
+                    label: qsTr("Random game")
+                });
             if (!launchable && !Browse.SystemLaunchers.loading && Browse.SystemLaunchers.error_message === "" && Browse.SystemLaunchers.launcher_count_for_system(systemId) > 0) {
                 entries.push({
                     id: "change_launcher",
@@ -1634,6 +1587,11 @@ MainLayout {
             // members are all launch-only yields none and the actions would
             // no-op, so omit them rather than show dead entries.
             const hasIndexable = category !== "" && Browse.SystemsModel.system_ids_for_category(category).length > 0;
+            if (hasIndexable)
+                entries.unshift({
+                    id: "launch_random_category",
+                    label: qsTr("Random game")
+                });
             if (!mediaBusy && hasIndexable) {
                 entries.push({
                     id: "index_category",
@@ -1644,6 +1602,14 @@ MainLayout {
                 });
             }
             return entries;
+        }
+        if (owner === "hub_favorites") {
+            return [
+                {
+                    id: "launch_random_favorite",
+                    label: qsTr("Random game")
+                }
+            ];
         }
         if (owner === "recents") {
             const entries = [
@@ -1730,6 +1696,21 @@ MainLayout {
         return entries;
     }
 
+    function openHubActionContextMenu(actionId: string, anchorRect): void {
+        if (actionId !== "favorites")
+            return;
+        const entries = root.buildContextMenuEntries("hub_favorites", "", false, false, false, "", false, "");
+        root.contextMenuEntries = entries;
+        root.contextMenuOwner = "hub_favorites";
+        root.contextMenuIndex = 0;
+        root.contextMenuMode = "main";
+        root.contextMenuAnchor = anchorRect;
+        root._requestModal(root.modalContextMenu);
+        root.contextMenuVisible = true;
+        if (ScreenManager.topModal !== root.modalContextMenu)
+            ScreenManager.pushModal(root.modalContextMenu);
+    }
+
     function openContextMenu(owner: string, index: int, anchorRect): void {
         if (index < 0)
             return;
@@ -1760,9 +1741,6 @@ MainLayout {
                 return;
             mediaCapable = true;
             isFavorite = Browse.FavoritesModel.is_favorite_at(index);
-        } else if (owner === "favoritesystems") {
-            if (index >= Browse.FavoriteSystemsModel.count)
-                return;
         } else if (owner === "recents") {
             if (index >= Browse.RecentsModel.count)
                 return;
@@ -1856,6 +1834,16 @@ MainLayout {
                 Browse.AlternateVersions.launch_at(altIndex);
         } else if (id === "launch_system") {
             Browse.SystemsModel.launch_at(targetIndex);
+        } else if (id === "launch_random_system") {
+            Browse.SystemsModel.launch_random_at(targetIndex);
+        } else if (id === "launch_random_category") {
+            const categoryName = Browse.CategoriesModel.category_at(targetIndex);
+            if (categoryName !== "") {
+                const systemIds = Browse.SystemsModel.system_ids_for_category(categoryName);
+                Browse.SystemsModel.launch_random_systems(systemIds);
+            }
+        } else if (id === "launch_random_favorite") {
+            Browse.FavoritesModel.launch_random();
         } else if (id === "index_system") {
             const systemId = Browse.SystemsModel.system_id_at(targetIndex);
             if (systemId !== "")
@@ -1908,13 +1896,6 @@ MainLayout {
                 Browse.GamesModel.toggle_favorite_at(targetIndex);
             else if (owner === "favorites")
                 Browse.FavoritesModel.toggle_favorite_at(targetIndex);
-        } else if (id === "switch_to_favorites") {
-            Browse.Settings.set_favorites_grouped(false);
-            root.favoritesScreenSystemId = "";
-            root._navigateToFavorites();
-        } else if (id === "switch_to_favorite_systems") {
-            Browse.Settings.set_favorites_grouped(true);
-            root._navigateToFavoriteSystems();
         } else if (id === "more_info") {
             root.openGameInfo(owner, targetIndex);
         } else if (id === "write_card") {
@@ -2116,6 +2097,46 @@ MainLayout {
         root._maybeOpenFirstRunIndex();
     }
 
+    function openRandomFailedModal(): void {
+        root._requestModal(root.modalRandomFailed);
+        root.randomFailedModalVisible = true;
+        if (ScreenManager.topModal !== root.modalRandomFailed)
+            ScreenManager.pushModal(root.modalRandomFailed);
+    }
+
+    function closeRandomFailedModal(): void {
+        root.randomFailedModalVisible = false;
+        Browse.GamesModel.clear_random_error();
+        Browse.FavoritesModel.clear_random_error();
+        Browse.SystemsModel.clear_random_error();
+        if (ScreenManager.topModal === root.modalRandomFailed)
+            ScreenManager.popModal();
+    }
+
+    Connections {
+        target: Browse.GamesModel
+        function onRandom_errorChanged(): void {
+            if ((Browse.GamesModel.random_error ?? "") !== "")
+                root.openRandomFailedModal();
+        }
+    }
+
+    Connections {
+        target: Browse.FavoritesModel
+        function onRandom_errorChanged(): void {
+            if ((Browse.FavoritesModel.random_error ?? "") !== "")
+                root.openRandomFailedModal();
+        }
+    }
+
+    Connections {
+        target: Browse.SystemsModel
+        function onRandom_errorChanged(): void {
+            if ((Browse.SystemsModel.random_error ?? "") !== "")
+                root.openRandomFailedModal();
+        }
+    }
+
     // Log-upload modal lifecycle. Triggered from the Settings "Upload
     // log" action; the modal kicks off `Browse.LogUpload.upload()` on
     // its own when `open` flips true. The modal owns its three-phase
@@ -2187,43 +2208,88 @@ MainLayout {
     }
 
     // Open the page/list-scoped operations menu (West button), the "View"
-    // counterpart to North's item-scoped "Options". For now it holds a single
-    // entry, Go to..., kept pre-focused so the common path is a fixed
-    // West-then-Accept chord; future list ops (sort/filter/layout) append here.
-    // The facet fetch is kicked off here so the buckets are likely ready by the
-    // time the user advances into the grid.
+    // counterpart to North's item-scoped "Options". Go to... stays
+    // pre-focused so common path is fixed West-then-Accept chord. Letter
+    // index fetch starts here so buckets are likely ready when user opens rail.
     function openPageMenu(): void {
-        let entries = [];
-        let initialId = "";
-        if (root.activeScreen === root.screenGames) {
-            Browse.GamesModel.load_letter_index();
-            entries = [
-                {
-                    "id": "jump_letter",
-                    "label": qsTr("Go to...")
-                }
-            ];
-            initialId = "jump_letter";
-        } else if (root.activeScreen === root.screenFavorites || root.activeScreen === root.screenFavoriteSystems) {
-            if (Browse.Settings.favorites_grouped) {
-                entries = [
-                    {
-                        "id": "switch_to_favorites",
-                        "label": qsTr("All Favorites")
-                    }
-                ];
-            } else {
-                entries = [
-                    {
-                        "id": "switch_to_favorite_systems",
-                        "label": qsTr("Group By Console")
-                    }
-                ];
+        Browse.GamesModel.load_letter_index();
+        const entries = [
+            {
+                "id": "jump_letter",
+                "label": qsTr("Go to...")
             }
-        }
-        if (entries.length === 0)
-            return;
-        root.openListPickerModal(qsTr("View"), entries, initialId, "page_menu");
+        ];
+        // Core path random is recursive, so folders containing only nested
+        // media remain valid scopes. Omit only when current browse is empty.
+        if (Browse.GamesModel.total_files > 0 || Browse.GamesModel.total_dirs > 0)
+            entries.push({
+                "id": "launch_random",
+                "label": qsTr("Random game")
+            });
+        // Level-local favorites projection: files of this folder filter
+        // to the favorite ones; directories stay for navigation.
+        entries.push({
+            "id": "games_filter",
+            "label": qsTr("Show: %1").arg(Browse.GamesModel.favorites_only ? qsTr("Favorites") : qsTr("All"))
+        });
+        root.openListPickerModal(qsTr("View"), entries, "jump_letter", "page_menu");
+    }
+
+    // Games filter picker: the page-menu row announces the active state
+    // ("Show: All" / "Show: Favorites"); this picker presents the actual
+    // choice, preselected on what is active, mirroring the favorites
+    // screen's filter menu.
+    function openGamesFilterMenu(): void {
+        const entries = [
+            {
+                "id": "all",
+                "label": qsTr("All")
+            },
+            {
+                "id": "favorites",
+                "label": qsTr("Favorites")
+            }
+        ];
+        const active = Browse.GamesModel.favorites_only ? "favorites" : "all";
+        root.openListPickerModal(qsTr("Show"), entries, active, "games_filter_pick");
+    }
+
+    // Favorites View controls Core-backed ordering and tagged random launch.
+    function openFavoritesPageMenu(): void {
+        const entries = [
+            {
+                "id": "favorites_sort",
+                "label": qsTr("Sort: %1").arg(root._favoritesSortLabel())
+            },
+            {
+                "id": "launch_random_favorite",
+                "label": qsTr("Random favorite")
+            }
+        ];
+        root.openListPickerModal(qsTr("View"), entries, "favorites_sort", "page_menu_favorites");
+    }
+
+    function _favoritesSortLabel(): string {
+        return Browse.FavoritesModel.sort_mode === "name" ? qsTr("A-Z") : qsTr("Default");
+    }
+
+    function openFavoritesSortMenu(): void {
+        // Same trap as the filter picker: ListPickerModal treats an empty id
+        // as "nothing pending" and never emits an accept for it, so the
+        // default row needs a real id mapped back on accept. Without this,
+        // choosing A-Z once left no way back to Core's order.
+        const entries = [
+            {
+                "id": root._favoritesSortDefault,
+                "label": qsTr("Default")
+            },
+            {
+                "id": "name",
+                "label": qsTr("A-Z")
+            }
+        ];
+        const active = Browse.FavoritesModel.sort_mode === "" ? root._favoritesSortDefault : Browse.FavoritesModel.sort_mode;
+        root.openListPickerModal(qsTr("Sort"), entries, active, "favorites_sort_pick");
     }
 
     // Re-parse the model's facet JSON into the live grid entries. Bound through
@@ -2413,14 +2479,33 @@ MainLayout {
             root.closeListPickerModal();
             if (selectedId === "jump_letter")
                 root.openLetterJumpModal();
-            else if (selectedId === "switch_to_favorites") {
-                Browse.Settings.set_favorites_grouped(false);
-                root.favoritesScreenSystemId = "";
-                root._navigateToFavorites();
-            } else if (selectedId === "switch_to_favorite_systems") {
-                Browse.Settings.set_favorites_grouped(true);
-                root._navigateToFavoriteSystems();
-            }
+            else if (selectedId === "launch_random")
+                Browse.GamesModel.launch_random();
+            else if (selectedId === "games_filter")
+                root.openGamesFilterMenu();
+            return;
+        }
+        if (fieldId === "games_filter_pick") {
+            root.closeListPickerModal();
+            const enabled = selectedId === "favorites";
+            Browse.GamesModel.apply_favorites_filter(enabled);
+            Browse.GamesState.favorites_filter = enabled;
+            return;
+        }
+        if (fieldId === "page_menu_favorites") {
+            root.closeListPickerModal();
+            if (selectedId === "favorites_sort")
+                root.openFavoritesSortMenu();
+            else if (selectedId === "launch_random_favorite")
+                Browse.FavoritesModel.launch_random();
+            return;
+        }
+        if (fieldId === "favorites_sort_pick") {
+            root.closeListPickerModal();
+            const mode = selectedId === root._favoritesSortDefault ? "" : selectedId;
+            Browse.FavoritesModel.set_sort_mode(mode);
+            if (!Browse.FavoritesModel.loading && root.favoritesScreen !== null)
+                root.favoritesScreen.restoreSelection();
             return;
         }
         if (fieldId === "system_launcher_pending")
@@ -2568,6 +2653,7 @@ MainLayout {
     onCloseFirstRunIndexRequested: root.closeFirstRunIndexModal()
     onCloseCommercialNoticeRequested: root.closeCommercialNoticeModal()
     onCloseCoreVersionRequested: root.closeCoreVersionModal()
+    onCloseRandomFailedRequested: root.closeRandomFailedModal()
 
     function beginCardWrite(owner: string): void {
         if (owner === "systems")
@@ -2674,6 +2760,10 @@ MainLayout {
             } else if (ScreenManager.topModal === root.modalCoreVersion) {
                 if (root.coreVersionModal !== null)
                     root.coreVersionModal.handleAction(action);
+            } else if (ScreenManager.topModal === root.modalRandomFailed) {
+                // Accept or Back both dismiss one-button notice.
+                if (action === "accept" || action === "cancel")
+                    root.closeRandomFailedModal();
             } else if (ScreenManager.topModal === root.modalLogUpload) {
                 if (root.logUploadModal !== null)
                     root.logUploadModal.handleAction(action);
@@ -2707,9 +2797,6 @@ MainLayout {
         } else if (root.activeScreen === root.screenFavorites) {
             if (root.favoritesScreen !== null)
                 root.favoritesScreen.handleAction(action);
-        } else if (root.activeScreen === root.screenFavoriteSystems) {
-            if (root.favoriteSystemsScreen !== null)
-                root.favoriteSystemsScreen.handleAction(action);
         } else if (root.activeScreen === root.screenRecents) {
             if (root.recentsScreen !== null)
                 root.recentsScreen.handleAction(action);
@@ -3261,13 +3348,6 @@ MainLayout {
         interval: 50
         repeat: false
         onTriggered: root._startFavoritesTransitionLoad()
-    }
-
-    Timer {
-        id: favoriteSystemsTransitionTimer
-        interval: 50
-        repeat: false
-        onTriggered: root._startFavoriteSystemsTransitionLoad()
     }
 
     Timer {

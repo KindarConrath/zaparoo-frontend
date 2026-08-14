@@ -73,27 +73,27 @@ Item {
     readonly property var _placeholderCategories: [
         {
             id: CategoryIds.arcadeId,
-            name: qsTr("Arcade"),
+            name: CategoryIds.displayName(CategoryIds.arcadeId),
             coverKey: hub._hubCoverKey(CategoryIds.arcadeId, CategoryIds.coverKey(CategoryIds.arcadeId))
         },
         {
             id: CategoryIds.computerId,
-            name: qsTr("Computers"),
+            name: CategoryIds.displayName(CategoryIds.computerId),
             coverKey: hub._hubCoverKey(CategoryIds.computerId, CategoryIds.coverKey(CategoryIds.computerId))
         },
         {
             id: CategoryIds.consoleId,
-            name: qsTr("Consoles"),
+            name: CategoryIds.displayName(CategoryIds.consoleId),
             coverKey: hub._hubCoverKey(CategoryIds.consoleId, CategoryIds.coverKey(CategoryIds.consoleId))
         },
         {
             id: CategoryIds.handheldId,
-            name: qsTr("Handhelds"),
+            name: CategoryIds.displayName(CategoryIds.handheldId),
             coverKey: hub._hubCoverKey(CategoryIds.handheldId, CategoryIds.coverKey(CategoryIds.handheldId))
         },
         {
             id: CategoryIds.otherId,
-            name: qsTr("Other"),
+            name: CategoryIds.displayName(CategoryIds.otherId),
             coverKey: hub._hubCoverKey(CategoryIds.otherId, CategoryIds.coverKey(CategoryIds.otherId))
         }
     ]
@@ -119,7 +119,7 @@ Item {
             const name = Browse.CategoriesModel.category_at(i);
             entries.push({
                 id: name,
-                name: name,
+                name: CategoryIds.displayName(name),
                 coverKey: hub._hubCoverKey(name, CategoryIds.coverKey(name)),
                 hidden: Browse.CategoriesModel.is_hidden_at(i)
             });
@@ -171,6 +171,7 @@ Item {
     // `anchorRect` is the tile's bounding rect mapped to hub coordinates,
     // used by the context menu to position itself.
     signal requestContextMenu(index: int, anchorRect: rect)
+    signal requestActionContextMenu(actionId: string, anchorRect: rect)
 
     // Vertically center the (categories row + actions row + activeLabel)
     // block in the band between the HeaderBar bottom (Sizing.headerBottom)
@@ -543,6 +544,13 @@ Item {
         return item.mapToItem(hub, 0, 0, item.width, item.height);
     }
 
+    function _currentActionCellRect(): rect {
+        const item = actionRepeater.itemAt(hub.currentIndex);
+        if (!item)
+            return Qt.rect(0, 0, 0, 0);
+        return item.mapToItem(hub, 0, 0, item.width, item.height);
+    }
+
     function handleAction(action: string): void {
         hub._focusArmed = true;
         if (action === "left") {
@@ -559,10 +567,15 @@ Item {
         } else if (action === "cancel") {
             hub.requestQuit();
         } else if (action === "context_menu") {
-            // Only open the context menu for real (non-placeholder) category
-            // tiles — placeholders have no category to hide or scrape.
-            if (hub.currentRow === 0 && hub.currentIndex < Browse.CategoriesModel.count)
+            // Only real categories have category actions. Favorites is the
+            // only Hub action tile with a collection-scoped Options menu.
+            if (hub.currentRow === 0 && hub.currentIndex < Browse.CategoriesModel.count) {
                 hub.requestContextMenu(hub.currentIndex, hub._currentCategoryCellRect());
+            } else if (hub.currentRow === 1) {
+                const entry = hub.actionEntries[hub.currentIndex];
+                if (entry && entry.id === "favorites")
+                    hub.requestActionContextMenu(entry.id, hub._currentActionCellRect());
+            }
         }
     }
 
@@ -713,6 +726,8 @@ Item {
         }
 
         Repeater {
+            id: actionRepeater
+
             model: hub.actionEntries
 
             Item {
@@ -744,13 +759,16 @@ Item {
                 MouseArea {
                     anchors.fill: parent
                     hoverEnabled: true
-                    acceptedButtons: actionCellItem.modelData.enabled === false ? Qt.NoButton : Qt.LeftButton
+                    acceptedButtons: actionCellItem.modelData.enabled === false ? Qt.NoButton : (actionCellItem.modelData.id === "favorites" ? Qt.LeftButton | Qt.RightButton : Qt.LeftButton)
                     cursorShape: actionCellItem.modelData.enabled === false ? Qt.ArrowCursor : Qt.PointingHandCursor
 
                     onEntered: hub._focusAction(actionCellItem.index)
-                    onClicked: {
+                    onClicked: mouse => {
                         hub._focusAction(actionCellItem.index);
-                        hub._activateCurrent();
+                        if (mouse.button === Qt.RightButton)
+                            hub.requestActionContextMenu(actionCellItem.modelData.id, actionCellItem.mapToItem(hub, 0, 0, actionCellItem.width, actionCellItem.height));
+                        else
+                            hub._activateCurrent();
                     }
                 }
             }
