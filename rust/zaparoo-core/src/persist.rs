@@ -122,10 +122,7 @@ pub struct SettingsState {
     pub orientation: String,
     #[serde(default = "default_browse_layout")]
     pub browse_layout: String,
-    #[serde(
-        default = "default_favorites_grouped",
-        deserialize_with = "deserialize_favorites_grouped"
-    )]
+    #[serde(default)]
     pub favorites_grouped: bool,
     #[serde(default = "default_system_logo_style")]
     pub system_logo_style: String,
@@ -179,7 +176,7 @@ impl Default for SettingsState {
             clock_format: default_clock_format(),
             orientation: default_orientation(),
             browse_layout: default_browse_layout(),
-            favorites_grouped: default_favorites_grouped(),
+            favorites_grouped: false,
             system_logo_style: default_system_logo_style(),
             button_layout: default_button_layout(),
             mouse_enabled: default_mouse_enabled(),
@@ -216,28 +213,6 @@ fn default_orientation() -> String {
 
 fn default_browse_layout() -> String {
     "grid".into()
-}
-
-fn default_favorites_grouped() -> bool {
-    true
-}
-
-fn deserialize_favorites_grouped<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum FavoritesGroupedField {
-        Bool(bool),
-        String(String),
-    }
-
-    let field = FavoritesGroupedField::deserialize(deserializer)?;
-    Ok(match field {
-        FavoritesGroupedField::Bool(value) => value,
-        FavoritesGroupedField::String(value) => value.trim() != "favorites",
-    })
 }
 
 fn default_system_logo_style() -> String {
@@ -435,6 +410,8 @@ resolution = "1920x1080"
         std::fs::write(&path, on_disk).expect("write");
         let state = load_from(&path);
         assert!(!state.settings.show_hidden);
+        assert!(!state.settings.favorites_grouped);
+        assert_eq!(state.favorite_systems, FavoriteSystemsState::default());
         // reduce_motion absent from an older state file defaults to false.
         assert!(!state.settings.reduce_motion);
     }
@@ -513,6 +490,7 @@ resolution = "1920x1080"
         assert_eq!(state.systems, SystemsState::default());
         assert_eq!(state.games, GamesState::default());
         assert_eq!(state.favorites, FavoritesState::default());
+        assert_eq!(state.favorite_systems, FavoriteSystemsState::default());
         assert_eq!(state.recents, RecentsState::default());
         assert_eq!(state.settings, SettingsState::default());
     }

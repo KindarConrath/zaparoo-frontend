@@ -189,7 +189,6 @@ struct RawSettings {
     screensaver_timeout: Option<String>,
     media_image_type: Option<String>,
     favorites_grouped: Option<bool>,
-    favorites_entry_mode: Option<String>,
     show_hidden: Option<bool>,
     show_original_filenames: Option<bool>,
     #[serde(default)]
@@ -330,12 +329,7 @@ fn settings_config_from_raw(raw: RawSettings) -> SettingsConfig {
         discover_arcade_alternate_versions: raw.discover_arcade_alternate_versions,
         screensaver_timeout: trim_opt(raw.screensaver_timeout),
         media_image_type: trim_opt(raw.media_image_type),
-        favorites_grouped: raw.favorites_grouped.or_else(|| {
-            raw.favorites_entry_mode.as_deref().map(|value| {
-                let trimmed = value.trim();
-                trimmed != "favorites"
-            })
-        }),
+        favorites_grouped: raw.favorites_grouped,
         show_hidden: raw.show_hidden,
         show_original_filenames: raw.show_original_filenames,
         hidden_categories: normalize_string_list(raw.hidden_categories),
@@ -724,6 +718,7 @@ mod tests {
         assert_eq!(cfg.settings.clock_format, None);
         assert_eq!(cfg.settings.browse_layout, None);
         assert_eq!(cfg.settings.favorites_sort, None);
+        assert_eq!(cfg.settings.favorites_grouped, None);
         assert_eq!(cfg.settings.button_layout, None);
         assert_eq!(cfg.settings.mouse_enabled, None);
         assert_eq!(cfg.settings.discover_arcade_alternate_versions, None);
@@ -815,6 +810,21 @@ mod tests {
         let f = write_tmp("[settings]\nfavorites_sort = \"  name  \"\n");
         let cfg = load_config(f.path());
         assert_eq!(cfg.settings.favorites_sort.as_deref(), Some("name"));
+    }
+
+    #[test]
+    fn favorites_grouped_round_trips_from_settings() {
+        let grouped = write_tmp("[settings]\nfavorites_grouped = true\n");
+        assert_eq!(
+            load_config(grouped.path()).settings.favorites_grouped,
+            Some(true)
+        );
+
+        let flat = write_tmp("[settings]\nfavorites_grouped = false\n");
+        assert_eq!(
+            load_config(flat.path()).settings.favorites_grouped,
+            Some(false)
+        );
     }
 
     #[test]
@@ -1123,6 +1133,7 @@ mod tests {
         assert_eq!(cfg.settings.reduce_motion, Some(true));
         assert_eq!(cfg.settings.discover_arcade_alternate_versions, Some(true));
         assert_eq!(cfg.settings.screensaver_timeout.as_deref(), Some("300"));
+        assert_eq!(cfg.settings.favorites_grouped, Some(true));
         assert_eq!(cfg.settings.show_hidden, Some(true));
         assert_eq!(cfg.settings.show_original_filenames, Some(true));
         assert_eq!(cfg.settings.region.as_deref(), Some("us"));
@@ -1180,6 +1191,7 @@ mod tests {
         assert_eq!(cfg.settings.reduce_motion, Some(false));
         assert_eq!(cfg.settings.discover_arcade_alternate_versions, Some(false));
         assert_eq!(cfg.settings.screensaver_timeout.as_deref(), Some("60"));
+        assert_eq!(cfg.settings.favorites_grouped, Some(true));
         assert_eq!(cfg.settings.hidden_categories, vec!["Arcade"]);
         assert_eq!(cfg.settings.hidden_system_ids, vec!["NES"]);
         assert!(!cfg.debug_logging);
