@@ -518,23 +518,7 @@ impl Client {
     }
 
     pub async fn systems(&self, params: SystemsParams) -> Result<SystemsResult, ClientError> {
-        #[derive(Serialize)]
-        struct P {}
-        let _ = params;
-        let val = self.call("systems", &P {}).await?;
-        serde_json::from_value(val).map_err(|e| ClientError {
-            message: e.to_string(),
-        })
-    }
-
-    pub async fn systems_favorites(
-        &self,
-        params: SystemsParams,
-    ) -> Result<SystemsResult, ClientError> {
-        #[derive(Serialize)]
-        struct P {}
-        let _ = params;
-        let val = self.call("systems.favorites", &P {}).await?;
+        let val = self.call("systems", &params).await?;
         serde_json::from_value(val).map_err(|e| ClientError {
             message: e.to_string(),
         })

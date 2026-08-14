@@ -57,7 +57,7 @@ pub fn dispatch(text: &str) -> String {
     debug!(method = %req.method, "rpc");
 
     let result = match req.method.as_str() {
-        "systems" => Some(fixtures::systems_response()),
+        "systems" => Some(fixtures::systems_response(&req.params)),
         "launchers" => Some(fixtures::launchers_response()),
         "settings" => Some(fixtures::settings_response()),
         "settings.update" => Some(fixtures::settings_update_response(&req.params)),
@@ -132,11 +132,29 @@ mod tests {
     }
 
     #[test]
-    fn systems_returns_fixture_catalog() {
+    fn systems_returns_fixture_catalog_with_counts() {
         let req = r#"{"jsonrpc":"2.0","id":"1","method":"systems","params":{}}"#;
         let resp = parse(&dispatch(req));
         let systems = resp["result"]["systems"].as_array().expect("array");
         assert_eq!(systems.len(), 10);
+        assert!(systems.iter().all(|system| system["mediaCount"].is_u64()));
+    }
+
+    #[test]
+    fn systems_filters_and_counts_favorite_tag() {
+        let req =
+            r#"{"jsonrpc":"2.0","id":"1","method":"systems","params":{"tags":["user:favorite"]}}"#;
+        let resp = parse(&dispatch(req));
+        let systems = resp["result"]["systems"].as_array().expect("array");
+        assert!(!systems.is_empty());
+        assert!(systems
+            .iter()
+            .all(|system| { system["mediaCount"].as_u64().is_some_and(|count| count > 0) }));
+        let total = systems
+            .iter()
+            .filter_map(|system| system["mediaCount"].as_u64())
+            .sum::<u64>();
+        assert_eq!(total, 20);
     }
 
     #[test]

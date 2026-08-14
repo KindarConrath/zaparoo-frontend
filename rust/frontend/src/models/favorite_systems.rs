@@ -11,6 +11,7 @@ use crate::system_region::Region;
 use crate::{system_logos, system_name_overrides, system_names, system_region};
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
+use std::collections::HashMap;
 use std::pin::Pin;
 use zaparoo_core::endpoints::systems_favorites::SystemsFavoritesEndpoint;
 use zaparoo_core::media_types::SystemsResult;
@@ -28,7 +29,9 @@ const DISAMBIGUATING_TAGS_ROLE: i32 = 256 + 6;
 #[derive(Default)]
 pub struct FavoriteSystemsModelRust {
     systems: Vec<SystemInfo>,
+    media_counts: HashMap<String, u32>,
     count: i32,
+    total_items: i32,
     loading: bool,
     cover_requests_paused: bool,
     error_message: QString,
@@ -60,6 +63,7 @@ pub mod ffi {
         #[qml_element]
         #[qml_singleton]
         #[qproperty(i32, count)]
+        #[qproperty(i32, total_items)]
         #[qproperty(bool, loading)]
         #[qproperty(bool, cover_requests_paused)]
         #[qproperty(QString, error_message)]
@@ -81,6 +85,9 @@ pub mod ffi {
 
         #[qinvokable]
         fn system_id_at(self: &FavoriteSystemsModel, index: i32) -> QString;
+
+        #[qinvokable]
+        fn media_count_for_system(self: &FavoriteSystemsModel, system_id: &QString) -> i32;
 
         #[qinvokable]
         fn index_for_path(self: &FavoriteSystemsModel, path: &QString) -> i32;
@@ -144,7 +151,7 @@ fn rows_for_catalog(
     show_hidden: bool,
     region: Region,
 ) -> Vec<SystemInfo> {
-    catalog.map_or_else(Vec::new, |c| {
+    let mut rows = catalog.map_or_else(Vec::new, |c| {
         c.systems
             .iter()
             .filter_map(|s| {
@@ -171,7 +178,26 @@ fn rows_for_catalog(
                 })
             })
             .collect()
-    })
+    });
+    rows.sort_by_key(|system| system.name.to_lowercase());
+    rows
+}
+
+fn favorite_media_counts(catalog: &SystemsResult) -> (HashMap<String, u32>, i32) {
+    let counts = catalog
+        .systems
+        .iter()
+        .filter_map(|system| system.media_count.map(|count| (system.id.clone(), count)))
+        .collect::<HashMap<_, _>>();
+    let total = if counts.len() == catalog.systems.len() {
+        counts
+            .values()
+            .fold(0_u64, |sum, count| sum.saturating_add(u64::from(*count)))
+            .min(i32::MAX as u64) as i32
+    } else {
+        -1
+    };
+    (counts, total)
 }
 
 fn apply_state(
@@ -183,15 +209,25 @@ fn apply_state(
         let show_hidden = with_persist_read(|s| s.settings.show_hidden);
         let region = system_region::current_region();
         let rows = rows_for_catalog(Some(&data), &hidden_ids, show_hidden, region);
-        let count = rows.len() as i32;
+        let (media_counts, total_items) = favorite_media_counts(&data);
+        let count = i32::try_from(rows.len()).unwrap_or(i32::MAX);
         model.as_mut().begin_reset_model();
-        model.as_mut().rust_mut().systems = rows;
-        model.as_mut().rust_mut().count = count;
+        {
+            let mut rust = model.as_mut().rust_mut();
+            rust.systems = rows;
+            rust.media_counts = media_counts;
+            rust.count = count;
+        }
         model.as_mut().end_reset_model();
         model.as_mut().count_changed();
+        if model.total_items != total_items {
+            model.as_mut().set_total_items(total_items);
+        }
         if model.loading {
             model.as_mut().set_loading(false);
         }
+    } else if model.total_items != -1 {
+        model.as_mut().set_total_items(-1);
     }
 
     let qerr = QString::from(err.as_str());
@@ -295,6 +331,13 @@ impl ffi::FavoriteSystemsModel {
         QString::from(self.systems[index as usize].id.as_str())
     }
 
+    fn media_count_for_system(&self, system_id: &QString) -> i32 {
+        self.media_counts
+            .get(&system_id.to_string())
+            .and_then(|count| i32::try_from(*count).ok())
+            .unwrap_or(-1)
+    }
+
     fn index_for_path(&self, path: &QString) -> i32 {
         let needle = path.to_string();
         if needle.is_empty() {
@@ -308,5 +351,45 @@ impl ffi::FavoriteSystemsModel {
 
     fn disambiguating_tags_at(&self, _index: i32) -> QString {
         QString::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::favorite_media_counts;
+    use zaparoo_core::media_types::{SystemInfo, SystemsResult};
+
+    #[test]
+    fn favorite_counts_sum_exact_system_counts() {
+        let catalog = SystemsResult {
+            systems: vec![
+                SystemInfo {
+                    id: "NES".into(),
+                    media_count: Some(4),
+                    ..SystemInfo::default()
+                },
+                SystemInfo {
+                    id: "SNES".into(),
+                    media_count: Some(7),
+                    ..SystemInfo::default()
+                },
+            ],
+        };
+        let (counts, total) = favorite_media_counts(&catalog);
+        assert_eq!(counts.get("NES"), Some(&4));
+        assert_eq!(counts.get("SNES"), Some(&7));
+        assert_eq!(total, 11);
+    }
+
+    #[test]
+    fn favorite_total_is_unknown_when_a_count_is_missing() {
+        let catalog = SystemsResult {
+            systems: vec![SystemInfo {
+                id: "NES".into(),
+                ..SystemInfo::default()
+            }],
+        };
+        let (_, total) = favorite_media_counts(&catalog);
+        assert_eq!(total, -1);
     }
 }

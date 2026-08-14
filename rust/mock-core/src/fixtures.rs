@@ -111,21 +111,49 @@ fn system_defaults() -> &'static Mutex<Vec<SystemDefaultFixture>> {
     })
 }
 
-pub fn systems_response() -> Value {
-    json!({
-        "systems": [
-            { "id": "NES",          "name": "Nintendo Entertainment System", "category": "Consoles" },
-            { "id": "SNES",         "name": "Super Nintendo",                "category": "Consoles" },
-            { "id": "Genesis",      "name": "Sega Genesis",                  "category": "Consoles" },
-            { "id": "Nintendo64",   "name": "Nintendo 64",                   "category": "Consoles" },
-            { "id": "Gameboy",      "name": "Game Boy",                      "category": "Handhelds" },
-            { "id": "GameboyColor", "name": "Game Boy Color",                "category": "Handhelds" },
-            { "id": "GBA",          "name": "Game Boy Advance",              "category": "Handhelds" },
-            { "id": "NDS",          "name": "Nintendo DS",                   "category": "Handhelds" },
-            { "id": "MAME",         "name": "MAME",                          "category": "Arcade" },
-            { "id": "NeoGeo",       "name": "Neo Geo",                       "category": "Arcade" },
-        ]
+pub fn systems_response(params: &Value) -> Value {
+    let tags = params
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let systems = [
+        ("NES", "Nintendo Entertainment System", "Consoles"),
+        ("SNES", "Super Nintendo", "Consoles"),
+        ("Genesis", "Sega Genesis", "Consoles"),
+        ("Nintendo64", "Nintendo 64", "Consoles"),
+        ("Gameboy", "Game Boy", "Handhelds"),
+        ("GameboyColor", "Game Boy Color", "Handhelds"),
+        ("GBA", "Game Boy Advance", "Handhelds"),
+        ("NDS", "Nintendo DS", "Handhelds"),
+        ("MAME", "MAME", "Arcade"),
+        ("NeoGeo", "Neo Geo", "Arcade"),
+    ]
+    .into_iter()
+    .filter_map(|(id, name, category)| {
+        let media_count = ALL_GAMES
+            .iter()
+            .enumerate()
+            .filter(|(index, (_, file, system))| {
+                *system == id
+                    && tags.iter().all(|tag| {
+                        let game = json!({ "tags": tags_for(file, *index) });
+                        game_has_tag(&game, tag)
+                    })
+            })
+            .count();
+        if !tags.is_empty() && media_count == 0 {
+            return None;
+        }
+        Some(json!({
+            "id": id,
+            "name": name,
+            "category": category,
+            "mediaCount": media_count,
+        }))
     })
+    .collect::<Vec<_>>();
+    json!({ "systems": systems })
 }
 
 pub fn media_search_response(params: &Value) -> Value {

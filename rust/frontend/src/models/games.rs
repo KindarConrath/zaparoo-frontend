@@ -53,7 +53,6 @@ use zaparoo_core::endpoints::media_browse::{BrowseArgs, MediaBrowseEndpoint};
 use zaparoo_core::endpoints::media_tags_update::MediaTagsUpdateMutation;
 use zaparoo_core::endpoints::readers_write::ReadersWriteMutation;
 use zaparoo_core::endpoints::run::RunMutation;
-use zaparoo_core::endpoints::systems_favorites::SystemsFavoritesEndpoint;
 use zaparoo_core::media_types::{
     BrowseEntry, MediaBrowseIndexParams, MediaBrowseParams, MediaBrowseResult, MediaMeta,
     MediaMetaParams, MediaTagsUpdateParams, ReadersWriteParams, RunParams, TagInfo,
@@ -1125,7 +1124,6 @@ impl ffi::GamesModel {
         global_handle().spawn(async move {
             match store.run_mutation::<MediaTagsUpdateMutation>(params).await {
                 Ok(result) => {
-                    store.subscribe::<SystemsFavoritesEndpoint>(()).refetch();
                     let _ = qt_thread.queue(move |mut model| {
                         apply_favorite_tags(
                             model.as_mut(),
