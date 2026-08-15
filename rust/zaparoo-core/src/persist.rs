@@ -122,8 +122,8 @@ pub struct SettingsState {
     pub orientation: String,
     #[serde(default = "default_browse_layout")]
     pub browse_layout: String,
-    #[serde(default)]
-    pub favorites_grouped: bool,
+    #[serde(default = "default_favorites_grouping")]
+    pub favorites_grouping: String,
     #[serde(default = "default_system_logo_style")]
     pub system_logo_style: String,
     #[serde(default = "default_button_layout")]
@@ -176,7 +176,7 @@ impl Default for SettingsState {
             clock_format: default_clock_format(),
             orientation: default_orientation(),
             browse_layout: default_browse_layout(),
-            favorites_grouped: false,
+            favorites_grouping: default_favorites_grouping(),
             system_logo_style: default_system_logo_style(),
             button_layout: default_button_layout(),
             mouse_enabled: default_mouse_enabled(),
@@ -213,6 +213,10 @@ fn default_orientation() -> String {
 
 fn default_browse_layout() -> String {
     "grid".into()
+}
+
+fn default_favorites_grouping() -> String {
+    "none".into()
 }
 
 fn default_system_logo_style() -> String {
@@ -370,7 +374,7 @@ mod tests {
                 clock_format: "24h".into(),
                 orientation: "cw".into(),
                 browse_layout: "list".into(),
-                favorites_grouped: true,
+                favorites_grouping: "system".into(),
                 system_logo_style: "color".into(),
                 button_layout: "b".into(),
                 mouse_enabled: false,
@@ -410,7 +414,7 @@ resolution = "1920x1080"
         std::fs::write(&path, on_disk).expect("write");
         let state = load_from(&path);
         assert!(!state.settings.show_hidden);
-        assert!(!state.settings.favorites_grouped);
+        assert_eq!(state.settings.favorites_grouping, "none");
         assert_eq!(state.favorite_systems, FavoriteSystemsState::default());
         // reduce_motion absent from an older state file defaults to false.
         assert!(!state.settings.reduce_motion);

@@ -66,7 +66,7 @@ pub struct SettingsConfig {
     pub discover_arcade_alternate_versions: Option<bool>,
     pub screensaver_timeout: Option<String>,
     pub media_image_type: Option<String>,
-    pub favorites_grouped: Option<bool>,
+    pub favorites_grouping: Option<String>,
     pub show_hidden: Option<bool>,
     pub show_original_filenames: Option<bool>,
     pub hidden_categories: Vec<String>,
@@ -96,7 +96,7 @@ pub struct SettingsMirror<'a> {
     pub debug_logging: bool,
     pub screensaver_timeout: &'a str,
     pub media_image_type: &'a str,
-    pub favorites_grouped: bool,
+    pub favorites_grouping: &'a str,
     pub show_hidden: bool,
     pub show_original_filenames: bool,
     pub region: &'a str,
@@ -188,6 +188,8 @@ struct RawSettings {
     discover_arcade_alternate_versions: Option<bool>,
     screensaver_timeout: Option<String>,
     media_image_type: Option<String>,
+    favorites_grouping: Option<String>,
+    // Pre-release compatibility: early grouped-Favorites builds wrote a bool.
     favorites_grouped: Option<bool>,
     show_hidden: Option<bool>,
     show_original_filenames: Option<bool>,
@@ -329,7 +331,10 @@ fn settings_config_from_raw(raw: RawSettings) -> SettingsConfig {
         discover_arcade_alternate_versions: raw.discover_arcade_alternate_versions,
         screensaver_timeout: trim_opt(raw.screensaver_timeout),
         media_image_type: trim_opt(raw.media_image_type),
-        favorites_grouped: raw.favorites_grouped,
+        favorites_grouping: trim_opt(raw.favorites_grouping).or_else(|| {
+            raw.favorites_grouped
+                .map(|grouped| if grouped { "system" } else { "none" }.to_string())
+        }),
         show_hidden: raw.show_hidden,
         show_original_filenames: raw.show_original_filenames,
         hidden_categories: normalize_string_list(raw.hidden_categories),
@@ -421,9 +426,10 @@ pub fn save_settings_mirror(path: &Path, mirror: SettingsMirror<'_>) -> Result<(
         "media_image_type".into(),
         toml::Value::String(mirror.media_image_type.trim().to_string()),
     );
+    settings.remove("favorites_grouped");
     settings.insert(
-        "favorites_grouped".into(),
-        toml::Value::Boolean(mirror.favorites_grouped),
+        "favorites_grouping".into(),
+        toml::Value::String(mirror.favorites_grouping.trim().to_string()),
     );
     settings.insert(
         "show_hidden".into(),
@@ -718,7 +724,7 @@ mod tests {
         assert_eq!(cfg.settings.clock_format, None);
         assert_eq!(cfg.settings.browse_layout, None);
         assert_eq!(cfg.settings.favorites_sort, None);
-        assert_eq!(cfg.settings.favorites_grouped, None);
+        assert_eq!(cfg.settings.favorites_grouping, None);
         assert_eq!(cfg.settings.button_layout, None);
         assert_eq!(cfg.settings.mouse_enabled, None);
         assert_eq!(cfg.settings.discover_arcade_alternate_versions, None);
@@ -813,17 +819,41 @@ mod tests {
     }
 
     #[test]
-    fn favorites_grouped_round_trips_from_settings() {
+    fn favorites_grouping_round_trips_from_settings() {
+        let f = write_tmp("[settings]\nfavorites_grouping = \"  system  \"\n");
+        assert_eq!(
+            load_config(f.path()).settings.favorites_grouping.as_deref(),
+            Some("system")
+        );
+    }
+
+    #[test]
+    fn favorites_grouping_migrates_pre_release_boolean() {
         let grouped = write_tmp("[settings]\nfavorites_grouped = true\n");
         assert_eq!(
-            load_config(grouped.path()).settings.favorites_grouped,
-            Some(true)
+            load_config(grouped.path())
+                .settings
+                .favorites_grouping
+                .as_deref(),
+            Some("system")
         );
 
         let flat = write_tmp("[settings]\nfavorites_grouped = false\n");
         assert_eq!(
-            load_config(flat.path()).settings.favorites_grouped,
-            Some(false)
+            load_config(flat.path())
+                .settings
+                .favorites_grouping
+                .as_deref(),
+            Some("none")
+        );
+    }
+
+    #[test]
+    fn explicit_favorites_grouping_wins_over_pre_release_boolean() {
+        let f = write_tmp("[settings]\nfavorites_grouping = \"none\"\nfavorites_grouped = true\n");
+        assert_eq!(
+            load_config(f.path()).settings.favorites_grouping.as_deref(),
+            Some("none")
         );
     }
 
@@ -1109,7 +1139,7 @@ mod tests {
                 debug_logging: true,
                 screensaver_timeout: "300",
                 media_image_type: "auto",
-                favorites_grouped: true,
+                favorites_grouping: "system",
                 show_hidden: true,
                 show_original_filenames: true,
                 region: "us",
@@ -1133,7 +1163,7 @@ mod tests {
         assert_eq!(cfg.settings.reduce_motion, Some(true));
         assert_eq!(cfg.settings.discover_arcade_alternate_versions, Some(true));
         assert_eq!(cfg.settings.screensaver_timeout.as_deref(), Some("300"));
-        assert_eq!(cfg.settings.favorites_grouped, Some(true));
+        assert_eq!(cfg.settings.favorites_grouping.as_deref(), Some("system"));
         assert_eq!(cfg.settings.show_hidden, Some(true));
         assert_eq!(cfg.settings.show_original_filenames, Some(true));
         assert_eq!(cfg.settings.region.as_deref(), Some("us"));
@@ -1165,7 +1195,7 @@ mod tests {
                 debug_logging: false,
                 screensaver_timeout: "60",
                 media_image_type: "auto",
-                favorites_grouped: true,
+                favorites_grouping: "system",
                 show_hidden: false,
                 show_original_filenames: false,
                 region: "auto",
@@ -1191,7 +1221,7 @@ mod tests {
         assert_eq!(cfg.settings.reduce_motion, Some(false));
         assert_eq!(cfg.settings.discover_arcade_alternate_versions, Some(false));
         assert_eq!(cfg.settings.screensaver_timeout.as_deref(), Some("60"));
-        assert_eq!(cfg.settings.favorites_grouped, Some(true));
+        assert_eq!(cfg.settings.favorites_grouping.as_deref(), Some("system"));
         assert_eq!(cfg.settings.hidden_categories, vec!["Arcade"]);
         assert_eq!(cfg.settings.hidden_system_ids, vec!["NES"]);
         assert!(!cfg.debug_logging);
@@ -1216,7 +1246,7 @@ mod tests {
                 debug_logging: true,
                 screensaver_timeout: "off",
                 media_image_type: "auto",
-                favorites_grouped: true,
+                favorites_grouping: "system",
                 show_hidden: false,
                 show_original_filenames: false,
                 region: "auto",

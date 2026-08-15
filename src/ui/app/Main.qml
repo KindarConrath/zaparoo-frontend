@@ -1263,7 +1263,7 @@ MainLayout {
             return;
         }
         if (targetScreen === root.screenFavorites) {
-            const restoredSystemId = Browse.Settings.favorites_grouped ? Browse.FavoriteSystemsState.selected_path : "";
+            const restoredSystemId = Browse.Settings.current_favorites_grouping === "system" ? Browse.FavoriteSystemsState.selected_path : "";
             root._setFavoritesSystem(restoredSystemId);
             root._whenScreenReady(root.screenFavorites, function () {
                 root._resumeFavoritesCovers();
@@ -1416,7 +1416,7 @@ MainLayout {
             root.openQuitConfirmModal();
         }
         function onRequestFavoritesScreen(): void {
-            if (Browse.Settings.favorites_grouped)
+            if (Browse.Settings.current_favorites_grouping === "system")
                 root._navigateToFavoriteSystems();
             else
                 root._navigateToFavorites("");
@@ -1440,7 +1440,7 @@ MainLayout {
     Connections {
         target: root.favoritesScreen
         function onRequestHubScreen(): void {
-            if (root.favoritesSystemId !== "" && Browse.Settings.favorites_grouped)
+            if (root.favoritesSystemId !== "" && Browse.Settings.current_favorites_grouping === "system")
                 root._navigateBackToScreen(root.screenFavoriteSystems);
             else
                 root._navigateBackToScreen(root.screenHub);
@@ -2402,22 +2402,21 @@ MainLayout {
     }
 
     function _favoritesGroupingLabel(): string {
-        return Browse.Settings.favorites_grouped ? qsTr("System") : qsTr("None");
+        return Browse.Settings.current_favorites_grouping === "system" ? qsTr("System") : qsTr("None");
     }
 
     function openFavoritesModeMenu(): void {
         const entries = [
             {
-                "id": "flat",
+                "id": "none",
                 "label": qsTr("None")
             },
             {
-                "id": "grouped",
+                "id": "system",
                 "label": qsTr("System")
             }
         ];
-        const active = Browse.Settings.favorites_grouped ? "grouped" : "flat";
-        root.openListPickerModal(qsTr("Group by"), entries, active, "favorites_mode_pick");
+        root.openListPickerModal(qsTr("Group by"), entries, Browse.Settings.current_favorites_grouping, "favorites_mode_pick");
     }
 
     function _favoritesSortLabel(): string {
@@ -2661,11 +2660,10 @@ MainLayout {
         }
         if (fieldId === "favorites_mode_pick") {
             root.closeListPickerModal();
-            const grouped = selectedId === "grouped";
-            if (Browse.Settings.favorites_grouped === grouped)
+            if (Browse.Settings.current_favorites_grouping === selectedId)
                 return;
-            Browse.Settings.set_favorites_grouped(grouped);
-            if (grouped)
+            Browse.Settings.set_favorites_grouping(selectedId);
+            if (selectedId === "system")
                 root._navigateToFavoriteSystems();
             else
                 root._navigateToFavorites("");
@@ -3428,6 +3426,7 @@ MainLayout {
                 case "resume":
                     return qsTr("Loading game…");
                 case "favorites":
+                case "favorite_systems":
                     return qsTr("Loading favorites…");
                 case "recents":
                     return qsTr("Loading recently played…");

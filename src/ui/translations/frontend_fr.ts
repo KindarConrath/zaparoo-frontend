@@ -349,19 +349,29 @@ Français - Wilfried</translation>
         <translation type="unfinished">Favoris</translation>
     </message>
     <message>
-        <location filename="../screens/FavoriteSystemsScreen.qml" line="31"/>
         <source>%1 systems</source>
-        <translation type="unfinished">%1 systèmes</translation>
+        <translation type="obsolete">%1 systèmes</translation>
     </message>
     <message>
         <location filename="../screens/FavoriteSystemsScreen.qml" line="32"/>
         <source>%1 / %2</source>
         <translation type="unfinished">%1 / %2</translation>
     </message>
-    <message>
+    <message numerus="yes">
+        <location filename="../screens/FavoriteSystemsScreen.qml" line="31"/>
+        <source>%n system(s)</source>
+        <translation type="unfinished">
+            <numerusform></numerusform>
+            <numerusform></numerusform>
+        </translation>
+    </message>
+    <message numerus="yes">
         <location filename="../screens/FavoriteSystemsScreen.qml" line="39"/>
-        <source>%1 favorites</source>
-        <translation type="unfinished"></translation>
+        <source>%n favorite(s)</source>
+        <translation type="unfinished">
+            <numerusform></numerusform>
+            <numerusform></numerusform>
+        </translation>
     </message>
     <message>
         <location filename="../screens/FavoriteSystemsScreen.qml" line="43"/>
@@ -391,10 +401,13 @@ Français - Wilfried</translation>
         <source>Loading favorites…</source>
         <translation>Chargement des favoris…</translation>
     </message>
-    <message>
+    <message numerus="yes">
         <location filename="../screens/FavoritesScreen.qml" line="39"/>
-        <source>%1 favorites</source>
-        <translation type="unfinished"></translation>
+        <source>%n favorite(s)</source>
+        <translation type="unfinished">
+            <numerusform></numerusform>
+            <numerusform></numerusform>
+        </translation>
     </message>
 </context>
 <context>
@@ -679,17 +692,17 @@ Français - Wilfried</translation>
         <translation>Afficher</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="3425"/>
+        <location filename="../app/Main.qml" line="3423"/>
         <source>Loading systems…</source>
         <translation>Chargement des systèmes…</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="3431"/>
+        <location filename="../app/Main.qml" line="3430"/>
         <source>Loading favorites…</source>
         <translation>Chargement des favoris…</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="3427"/>
+        <location filename="../app/Main.qml" line="3425"/>
         <source>Loading games…</source>
         <translation>Chargement des jeux…</translation>
     </message>
@@ -719,8 +732,8 @@ Français - Wilfried</translation>
     </message>
     <message>
         <location filename="../app/Main.qml" line="1939"/>
-        <location filename="../app/Main.qml" line="2424"/>
-        <location filename="../app/Main.qml" line="2435"/>
+        <location filename="../app/Main.qml" line="2423"/>
+        <location filename="../app/Main.qml" line="2434"/>
         <source>Default</source>
         <translation>Par défaut</translation>
     </message>
@@ -789,68 +802,68 @@ Français - Wilfried</translation>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="2420"/>
+        <location filename="../app/Main.qml" line="2419"/>
         <source>Group by</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="2424"/>
-        <location filename="../app/Main.qml" line="2439"/>
+        <location filename="../app/Main.qml" line="2423"/>
+        <location filename="../app/Main.qml" line="2438"/>
         <source>A-Z</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="2443"/>
+        <location filename="../app/Main.qml" line="2442"/>
         <source>Sort</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="2583"/>
+        <location filename="../app/Main.qml" line="2582"/>
         <source>Saving launcher</source>
         <translation>Enregistrement du lanceur</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="2587"/>
+        <location filename="../app/Main.qml" line="2586"/>
         <source>Saving…</source>
         <translation>Enregistrement…</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="2601"/>
+        <location filename="../app/Main.qml" line="2600"/>
         <source>Launcher update failed</source>
         <translation>Échec de la mise à jour du lanceur</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="2605"/>
+        <location filename="../app/Main.qml" line="2604"/>
         <source>Error: %1</source>
         <translation>Erreur&#xa0;: %1</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="2609"/>
+        <location filename="../app/Main.qml" line="2608"/>
         <source>Retry</source>
         <translation>Réessayer</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="2613"/>
+        <location filename="../app/Main.qml" line="2612"/>
         <source>Cancel</source>
         <translation>Annuler</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="3429"/>
+        <location filename="../app/Main.qml" line="3427"/>
         <source>Loading game…</source>
         <translation>Chargement du jeu…</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="3433"/>
+        <location filename="../app/Main.qml" line="3432"/>
         <source>Loading recently played…</source>
         <translation>Chargement des jeux récents…</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="3435"/>
+        <location filename="../app/Main.qml" line="3434"/>
         <source>Loading settings…</source>
         <translation>Chargement des réglages…</translation>
     </message>
     <message>
-        <location filename="../app/Main.qml" line="3437"/>
+        <location filename="../app/Main.qml" line="3436"/>
         <source>Loading…</source>
         <translation>Chargement…</translation>
     </message>

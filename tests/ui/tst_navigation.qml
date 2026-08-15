@@ -26,7 +26,7 @@ TestCase {
 
     // View preferences persist to disk; restore machine's original values.
     property string _originalFavoritesSort: ""
-    property bool _originalFavoritesGrouped: false
+    property string _originalFavoritesGrouping: "none"
     property bool _originalGamesFavoritesFilter: false
 
     Main {
@@ -38,7 +38,7 @@ TestCase {
 
     Component.onCompleted: {
         testCase._originalFavoritesSort = Browse.FavoritesModel.sort_mode ?? "";
-        testCase._originalFavoritesGrouped = Browse.Settings.favorites_grouped === true;
+        testCase._originalFavoritesGrouping = Browse.Settings.current_favorites_grouping ?? "none";
         testCase._originalGamesFavoritesFilter = Browse.GamesState.favorites_filter === true;
     }
 
@@ -71,7 +71,7 @@ TestCase {
         main._stopRepeat();
         main._resetRapidNavigation();
         main._setFavoritesSystem("");
-        Browse.Settings.set_favorites_grouped(false);
+        Browse.Settings.set_favorites_grouping("none");
     }
 
     function cleanup(): void {
@@ -84,10 +84,11 @@ TestCase {
             main.closeRandomFailedModal();
         // Restore persistent preferences changed by menu-routing tests.
         Browse.FavoritesModel.set_sort_mode(testCase._originalFavoritesSort);
-        Browse.Settings.set_favorites_grouped(testCase._originalFavoritesGrouped);
+        Browse.Settings.set_favorites_grouping(testCase._originalFavoritesGrouping);
         main._setFavoritesSystem("");
         Browse.GamesModel.apply_favorites_filter(testCase._originalGamesFavoritesFilter);
         Browse.GamesState.favorites_filter = testCase._originalGamesFavoritesFilter;
+        Browse.GamesModel.total_files = 0;
     }
 
     function test_initial_state_is_hub(): void {
@@ -157,7 +158,7 @@ TestCase {
     }
 
     function test_hub_favorites_action_uses_favorite_systems_mode(): void {
-        Browse.Settings.set_favorites_grouped(true);
+        Browse.Settings.set_favorites_grouping("system");
         main.hubScreen.currentRow = 1;
         main.hubScreen.currentIndex = main.hubScreen._actionIndexForId("favorites");
         main.handleKey(Qt.Key_Return);
@@ -165,7 +166,7 @@ TestCase {
     }
 
     function test_hub_favorites_action_uses_all_favorites_mode(): void {
-        Browse.Settings.set_favorites_grouped(false);
+        Browse.Settings.set_favorites_grouping("none");
         main.hubScreen.currentRow = 1;
         main.hubScreen.currentIndex = main.hubScreen._actionIndexForId("favorites");
         main.handleKey(Qt.Key_Return);
@@ -173,7 +174,7 @@ TestCase {
     }
 
     function test_scoped_favorites_back_routes_through_favorite_systems(): void {
-        Browse.Settings.set_favorites_grouped(true);
+        Browse.Settings.set_favorites_grouping("system");
         main._setFavoritesSystem("SNES");
         main.activeScreen = main.screenFavorites;
         main.favoritesScreen.handleAction("cancel");
@@ -187,7 +188,7 @@ TestCase {
     }
 
     function test_flat_favorites_back_routes_to_hub(): void {
-        Browse.Settings.set_favorites_grouped(false);
+        Browse.Settings.set_favorites_grouping("none");
         main._setFavoritesSystem("");
         main.activeScreen = main.screenFavorites;
         main.handleKey(Qt.Key_Escape);
@@ -727,7 +728,6 @@ TestCase {
         verify(ids.indexOf("launch_random") !== -1, "Random entry present");
         verify(ids.indexOf("games_filter") !== -1, "Show entry present");
         main.closeListPickerModal();
-        Browse.GamesModel.total_files = 0;
     }
 
     function test_random_launch_failure_is_reported(): void {
@@ -776,21 +776,21 @@ TestCase {
     }
 
     function test_favorites_mode_picker_switches_both_directions(): void {
-        Browse.Settings.set_favorites_grouped(false);
+        Browse.Settings.set_favorites_grouping("none");
         main.openFavoritesPageMenu();
         main.listPickerAccepted("page_menu_favorites", "favorites_mode");
         compare(main.listPickerFieldId, "favorites_mode_pick");
-        compare(main.listPickerEntries.map(e => e.id), ["flat", "grouped"]);
+        compare(main.listPickerEntries.map(e => e.id), ["none", "system"]);
 
-        main.listPickerAccepted("favorites_mode_pick", "grouped");
-        compare(Browse.Settings.favorites_grouped, true);
+        main.listPickerAccepted("favorites_mode_pick", "system");
+        compare(Browse.Settings.current_favorites_grouping, "system");
         compare(main.pendingTransition, "favorite_systems");
 
         main.pendingTransition = "";
         main.openFavoriteSystemsPageMenu();
         main.listPickerAccepted("page_menu_favorite_systems", "favorites_mode");
-        main.listPickerAccepted("favorites_mode_pick", "flat");
-        compare(Browse.Settings.favorites_grouped, false);
+        main.listPickerAccepted("favorites_mode_pick", "none");
+        compare(Browse.Settings.current_favorites_grouping, "none");
         compare(main.pendingTransition, "favorites");
         compare(main.favoritesSystemId, "");
     }
