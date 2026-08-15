@@ -6,7 +6,7 @@
 // filtered systems-favorites resource.
 
 use crate::image_overrides;
-use crate::models::{with_hidden_browse_prefs_read, with_persist_read};
+use crate::models::{global_store, with_hidden_browse_prefs_read, with_persist_read};
 use crate::system_region::Region;
 use crate::{system_logos, system_name_overrides, system_names, system_region};
 use cxx_qt::CxxQtType;
@@ -76,6 +76,9 @@ pub mod ffi {
 
         #[qinvokable]
         fn fetch_more(self: Pin<&mut FavoriteSystemsModel>);
+
+        #[qinvokable]
+        fn retry(self: Pin<&mut FavoriteSystemsModel>);
 
         #[qinvokable]
         fn name_at(self: &FavoriteSystemsModel, index: i32) -> QString;
@@ -281,7 +284,13 @@ impl ffi::FavoriteSystemsModel {
     }
 
     fn fetch_more(self: Pin<&mut Self>) {
-        // All systems are loaded in one pass from CatalogEndpoint. No paging.
+        // All systems are loaded in one pass from Core. No paging.
+    }
+
+    fn retry(self: Pin<&mut Self>) {
+        global_store()
+            .subscribe::<SystemsFavoritesEndpoint>(())
+            .refetch();
     }
 
     fn clear_current_detail(mut self: Pin<&mut Self>) {

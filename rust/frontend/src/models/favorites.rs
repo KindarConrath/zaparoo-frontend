@@ -258,6 +258,9 @@ pub mod ffi {
         fn launch_random(self: Pin<&mut FavoritesModel>);
 
         #[qinvokable]
+        fn launch_random_for_system(self: Pin<&mut FavoritesModel>, system_id: &QString);
+
+        #[qinvokable]
         fn clear_random_error(self: Pin<&mut FavoritesModel>);
 
         #[qinvokable]
@@ -704,29 +707,14 @@ impl ffi::FavoritesModel {
     }
 
     /// Ask Core to choose uniformly from favorite media in current scope.
-    fn launch_random(mut self: Pin<&mut Self>) {
-        if !self.random_error.is_empty() {
-            self.as_mut().set_random_error(QString::default());
-        }
-        let seq = self.rust().random_seq.clone();
-        let ticket = seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let qt_thread = self.qt_thread();
-        let store = global_store();
-        let text = random_favorite_script(&self.current_system_id.to_string());
-        global_handle().spawn(async move {
-            let result = store.run_mutation::<RunMutation>(RunParams { text }).await;
-            let _ = qt_thread.queue(move |mut model| {
-                if seq.load(Ordering::SeqCst) != ticket {
-                    return;
-                }
-                if let Err(error) = result {
-                    warn!("Core random favorite launch failed: {}", error.message);
-                    model
-                        .as_mut()
-                        .set_random_error(QString::from(error.message.as_str()));
-                }
-            });
-        });
+    fn launch_random(self: Pin<&mut Self>) {
+        let system_id = self.current_system_id.to_string();
+        launch_random_favorite(self, &system_id);
+    }
+
+    /// Ask Core to choose a favorite from one system without loading its rows.
+    fn launch_random_for_system(self: Pin<&mut Self>, system_id: &QString) {
+        launch_random_favorite(self, system_id.to_string().trim());
     }
 
     fn clear_random_error(mut self: Pin<&mut Self>) {
@@ -1773,6 +1761,31 @@ fn favorites_system_scope(system_id: &str) -> Vec<String> {
     } else {
         vec![system_id.to_string()]
     }
+}
+
+fn launch_random_favorite(mut model: Pin<&mut ffi::FavoritesModel>, system_id: &str) {
+    if !model.random_error.is_empty() {
+        model.as_mut().set_random_error(QString::default());
+    }
+    let seq = model.rust().random_seq.clone();
+    let ticket = seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let qt_thread = model.qt_thread();
+    let store = global_store();
+    let text = random_favorite_script(system_id);
+    global_handle().spawn(async move {
+        let result = store.run_mutation::<RunMutation>(RunParams { text }).await;
+        let _ = qt_thread.queue(move |mut model| {
+            if seq.load(Ordering::SeqCst) != ticket {
+                return;
+            }
+            if let Err(error) = result {
+                warn!("Core random favorite launch failed: {}", error.message);
+                model
+                    .as_mut()
+                    .set_random_error(QString::from(error.message.as_str()));
+            }
+        });
+    });
 }
 
 fn random_favorite_script(system_id: &str) -> String {

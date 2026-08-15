@@ -38,8 +38,8 @@ import Zaparoo.Browse as Browse
 // generalizes for any (topCount, bottomCount); see `_mapCrossRow`.
 //
 // Pure input dispatcher: emits one of `requestAccept(payload)`,
-// `requestFavoritesScreen`, `requestFavoriteSystemsScreen`, `requestRecentsScreen`,
-// `requestUpdateScreen`, `requestSettingsScreen`, or `requestQuit`.
+// `requestFavoritesScreen`, `requestRecentsScreen`, `requestUpdateScreen`,
+// `requestSettingsScreen`, or `requestQuit`.
 //
 // All cross-screen orchestration (model fills, deferred set_category,
 // cover prefetch, transition overlay, screen flip) lives in Main.qml.
@@ -162,7 +162,6 @@ Item {
 
     signal requestAccept(category: string)
     signal requestQuit
-    signal requestFavoriteSystemsScreen
     signal requestFavoritesScreen
     signal requestRecentsScreen
     signal requestUpdateScreen
@@ -515,12 +514,8 @@ Item {
         const id = entry.id;
         if (id === "resume")
             hub.requestAccept("resume");
-        else if (id === "favorites") {
-            if (Browse.Settings.favorites_grouped)
-                hub.requestFavoriteSystemsScreen();
-            else
-                hub.requestFavoritesScreen();
-        }
+        else if (id === "favorites")
+            hub.requestFavoritesScreen();
         else if (id === "recents")
             hub.requestRecentsScreen();
         else if (id === "update")

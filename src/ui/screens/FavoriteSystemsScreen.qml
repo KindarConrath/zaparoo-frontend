@@ -8,20 +8,18 @@ import Zaparoo.Ui
 import Zaparoo.Browse as Browse
 
 // Favorite Systems screen — paged grid driven by `Browse.FavoriteSystemsModel`.
-// Pure input dispatcher: emits `requestHubScreen()` on Escape and
-// `requestFavoritesScreenForSystem(systemId)` on Accept. It reuses the
-// shared `MediaListScreen` shell to keep list/detail layout, selection
-// persistence, and input plumbing consistent with Favorites and Recents.
+// Pure input dispatcher: emits a system id on Accept and the shared Hub signal
+// on Back. Main.qml owns destination choice and transition orchestration.
 MediaListScreen {
     id: favoriteSystems
 
     property alias favoriteSystemsGrid: favoriteSystems.mediaGrid
 
-    property string selectedSystemId: ""
+    signal requestAccept(string systemId)
 
     mediaModel: Browse.FavoriteSystemsModel
     mediaState: Browse.FavoriteSystemsState
-    screenTitle: qsTr("Favorite Systems")
+    screenTitle: qsTr("Favorites")
     gridViewId: "systemsGrid"
     listViewId: "systemsList"
     tateListViewId: "systemsListTate"
@@ -29,18 +27,26 @@ MediaListScreen {
     showBottomStatusRow: false
     activeLabelAtBottom: false
     gridBottomMargin: Sizing.pctH(8) + Sizing.pctH(7)
-    topStripTitleProvider: () => qsTr("Favorite Systems")
+    topStripTitleProvider: () => qsTr("Favorites")
     topStripTotalTextProvider: () => favoriteSystems.mediaGrid.itemCount > 0 ? qsTr("%1 systems").arg(Browse.FavoriteSystemsModel.count) : ""
     topStripRightTextProvider: () => !favoriteSystems._listLayout || favoriteSystems.mediaGrid.itemCount <= 0 ? "" : qsTr("%1 / %2").arg(favoriteSystems.mediaGrid.currentIndex + 1).arg(Math.max(1, Browse.FavoriteSystemsModel.count))
     activeLabelTextProvider: () => favoriteSystems.mediaGrid.itemCount > 0 ? Browse.FavoriteSystemsModel.name_at(favoriteSystems.mediaGrid.currentIndex) : ""
-    activeLabelTagsProvider: () => ""
+    activeLabelTagsProvider: () => {
+        if (favoriteSystems.mediaGrid.itemCount <= 0)
+            return "";
+        const systemId = Browse.FavoriteSystemsModel.system_id_at(favoriteSystems.mediaGrid.currentIndex);
+        const count = Browse.FavoriteSystemsModel.media_count_for_system(systemId);
+        return count >= 0 ? qsTr("%1 favorites").arg(count) : "";
+    }
     gridColumnsOverride: Sizing.systemsGridShape(Sizing.screenWidth, Sizing.screenHeight).columns
     gridRowsOverride: Sizing.systemsGridShape(Sizing.screenWidth, Sizing.screenHeight).rows
-    emptyText: qsTr("No favorited systems yet")
+    emptyText: qsTr("No favorites yet")
     loadingText: qsTr("Loading favorite systems…")
     detailShowTitle: false
     detailShowDescription: false
     detailPlaceholderKey: "icons/Console"
+    pageMenuEnabledWhenEmpty: true
+    retryAction: () => Browse.FavoriteSystemsModel.retry()
 
     acceptAction: index => {
         if (favoriteSystems.mediaModel === null)
@@ -48,17 +54,6 @@ MediaListScreen {
         if (favoriteSystems.mediaGrid.itemCount <= 0)
             return;
         const systemId = Browse.FavoriteSystemsModel.system_id_at(index);
-        favoriteSystems.requestFavoritesScreenForSystem(systemId);
+        favoriteSystems.requestAccept(systemId);
     }
-
-    cancelAction: () => {
-        favoriteSystems.requestHubScreen();
-    }
-
-    onListLayoutEntered: () => {
-        if (typeof favoriteSystems.mediaModel.ensure_loaded === "function")
-            Browse.FavoriteSystemsModel.ensure_loaded();
-    }
-
-    signal requestFavoritesScreenForSystem(string systemId)
 }

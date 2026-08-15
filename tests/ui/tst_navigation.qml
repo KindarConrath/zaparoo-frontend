@@ -26,6 +26,7 @@ TestCase {
 
     // View preferences persist to disk; restore machine's original values.
     property string _originalFavoritesSort: ""
+    property bool _originalFavoritesGrouped: false
     property bool _originalGamesFavoritesFilter: false
 
     Main {
@@ -37,6 +38,7 @@ TestCase {
 
     Component.onCompleted: {
         testCase._originalFavoritesSort = Browse.FavoritesModel.sort_mode ?? "";
+        testCase._originalFavoritesGrouped = Browse.Settings.favorites_grouped === true;
         testCase._originalGamesFavoritesFilter = Browse.GamesState.favorites_filter === true;
     }
 
@@ -53,6 +55,7 @@ TestCase {
         main.systemsScreenRequested = true;
         main.gamesScreenRequested = true;
         main.favoritesScreenRequested = true;
+        main.favoriteSystemsScreenRequested = true;
         main.recentsScreenRequested = true;
         main.settingsScreenRequested = true;
         main.activeScreen = main.screenHub;
@@ -67,7 +70,8 @@ TestCase {
         // next test if we didn't reset it here.
         main._stopRepeat();
         main._resetRapidNavigation();
-        Browse.Settings.set_favorites_grouped(true);
+        main._setFavoritesSystem("");
+        Browse.Settings.set_favorites_grouped(false);
     }
 
     function cleanup(): void {
@@ -80,6 +84,8 @@ TestCase {
             main.closeRandomFailedModal();
         // Restore persistent preferences changed by menu-routing tests.
         Browse.FavoritesModel.set_sort_mode(testCase._originalFavoritesSort);
+        Browse.Settings.set_favorites_grouped(testCase._originalFavoritesGrouped);
+        main._setFavoritesSystem("");
         Browse.GamesModel.apply_favorites_filter(testCase._originalGamesFavoritesFilter);
         Browse.GamesState.favorites_filter = testCase._originalGamesFavoritesFilter;
     }
@@ -155,7 +161,7 @@ TestCase {
         main.hubScreen.currentRow = 1;
         main.hubScreen.currentIndex = main.hubScreen._actionIndexForId("favorites");
         main.handleKey(Qt.Key_Return);
-        compare(main.pendingTransition, "favoriteSystems");
+        compare(main.pendingTransition, "favorite_systems");
     }
 
     function test_hub_favorites_action_uses_all_favorites_mode(): void {
@@ -164,6 +170,28 @@ TestCase {
         main.hubScreen.currentIndex = main.hubScreen._actionIndexForId("favorites");
         main.handleKey(Qt.Key_Return);
         compare(main.pendingTransition, "favorites");
+    }
+
+    function test_scoped_favorites_back_routes_through_favorite_systems(): void {
+        Browse.Settings.set_favorites_grouped(true);
+        main._setFavoritesSystem("SNES");
+        main.activeScreen = main.screenFavorites;
+        main.favoritesScreen.handleAction("cancel");
+        verify(main.activeScreen === main.screenFavoriteSystems || (main.pendingTransition === "back" && main._backTransitionTarget === main.screenFavoriteSystems), "Scoped Back targets Favorite Systems even while its model is loading");
+
+        main.pendingTransition = "";
+        main._backTransitionTarget = "";
+        main.activeScreen = main.screenFavoriteSystems;
+        main.favoriteSystemsScreen.handleAction("cancel");
+        compare(main.activeScreen, main.screenHub);
+    }
+
+    function test_flat_favorites_back_routes_to_hub(): void {
+        Browse.Settings.set_favorites_grouped(false);
+        main._setFavoritesSystem("");
+        main.activeScreen = main.screenFavorites;
+        main.handleKey(Qt.Key_Escape);
+        compare(main.activeScreen, main.screenHub);
     }
 
     // Enter on an empty systems screen retries the current load (the
@@ -622,17 +650,17 @@ TestCase {
 
     function test_context_menu_favorites_matches_games_media_entries(): void {
         const entries = main.buildContextMenuEntries("favorites", "", true, true, true, "", false, "");
-        compare(_idsOf(entries), ["toggle_favorite", "write_card", "qr_code", "launch_game", "switch_to_favorite_systems"]);
+        compare(_idsOf(entries), ["toggle_favorite", "write_card", "qr_code", "launch_game"]);
     }
 
     function test_context_menu_favorites_no_reader_omits_write_card(): void {
         const entries = main.buildContextMenuEntries("favorites", "", true, false, true, "", false, "");
-        compare(_idsOf(entries), ["toggle_favorite", "qr_code", "launch_game", "switch_to_favorite_systems"]);
+        compare(_idsOf(entries), ["toggle_favorite", "qr_code", "launch_game"]);
     }
 
-    function test_context_menu_favorite_systems_owner_includes_mode_switch(): void {
-        const entries = main.buildContextMenuEntries("favoritesystems", "", false, false, false, "", false, "");
-        compare(_idsOf(entries), ["switch_to_favorites"]);
+    function test_context_menu_favorite_systems_offers_scoped_random(): void {
+        const entries = main.buildContextMenuEntries("favorite_systems", "", false, false, false, "SNES", false, "");
+        compare(_idsOf(entries), ["launch_random_favorite_system"]);
     }
 
     function test_context_menu_hub_favorites_offers_random_only(): void {
@@ -731,16 +759,40 @@ TestCase {
         compare(main.gamesScreen.pageMenuEnabledWhenEmpty, true, "View remains reachable when filtered folder is empty");
     }
 
-    // Favorites View exposes Core-backed sorting and tagged random. Grouping is
-    // intentionally absent from this menu.
-    function test_favorites_page_menu_offers_sort_and_random(): void {
+    // Favorites View preserves PR #348 sorting/random and adds entry mode.
+    function test_favorites_page_menu_offers_sort_random_and_mode(): void {
         main.openFavoritesPageMenu();
         tryCompare(main, "listPickerModalVisible", true);
         const ids = main.listPickerEntries.map(e => e.id);
-        verify(ids.indexOf("favorites_sort") !== -1, "Sort entry present");
-        verify(ids.indexOf("launch_random_favorite") !== -1, "Random favorite entry present");
-        compare(ids.indexOf("favorites_filter"), -1, "grouping is not part of this PR");
+        compare(ids, ["favorites_sort", "favorites_mode", "launch_random_favorite"], "View order is Sort, Group by, Random");
         main.closeListPickerModal();
+    }
+
+    function test_favorite_systems_page_menu_offers_mode_only(): void {
+        main.openFavoriteSystemsPageMenu();
+        tryCompare(main, "listPickerModalVisible", true);
+        compare(main.listPickerEntries.map(e => e.id), ["favorites_mode"]);
+        main.closeListPickerModal();
+    }
+
+    function test_favorites_mode_picker_switches_both_directions(): void {
+        Browse.Settings.set_favorites_grouped(false);
+        main.openFavoritesPageMenu();
+        main.listPickerAccepted("page_menu_favorites", "favorites_mode");
+        compare(main.listPickerFieldId, "favorites_mode_pick");
+        compare(main.listPickerEntries.map(e => e.id), ["flat", "grouped"]);
+
+        main.listPickerAccepted("favorites_mode_pick", "grouped");
+        compare(Browse.Settings.favorites_grouped, true);
+        compare(main.pendingTransition, "favorite_systems");
+
+        main.pendingTransition = "";
+        main.openFavoriteSystemsPageMenu();
+        main.listPickerAccepted("page_menu_favorite_systems", "favorites_mode");
+        main.listPickerAccepted("favorites_mode_pick", "flat");
+        compare(Browse.Settings.favorites_grouped, false);
+        compare(main.pendingTransition, "favorites");
+        compare(main.favoritesSystemId, "");
     }
 
     // Choosing Sort must open a second picker on its own field id, and the

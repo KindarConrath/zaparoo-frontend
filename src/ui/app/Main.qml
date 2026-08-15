@@ -191,6 +191,8 @@ MainLayout {
             root._syncGamesModelLayout();
         } else if (screen === root.screenFavorites)
             root.favoritesScreenRequested = true;
+        else if (screen === root.screenFavoriteSystems)
+            root.favoriteSystemsScreenRequested = true;
         else if (screen === root.screenRecents)
             root.recentsScreenRequested = true;
         else if (screen === root.screenSettings)
@@ -212,6 +214,8 @@ MainLayout {
             return root.gamesScreen;
         if (screen === root.screenFavorites)
             return root.favoritesScreen;
+        if (screen === root.screenFavoriteSystems)
+            return root.favoriteSystemsScreen;
         if (screen === root.screenRecents)
             return root.recentsScreen;
         if (screen === root.screenSettings)
@@ -340,7 +344,7 @@ MainLayout {
     }
 
     function _isStableNavigationScreen(screen: string): bool {
-        if (screen === root.screenHub || screen === root.screenSystems || screen === root.screenGames || screen === root.screenFavorites || screen === root.screenRecents || screen === root.screenSettings || screen === root.screenAbout)
+        if (screen === root.screenHub || screen === root.screenSystems || screen === root.screenGames || screen === root.screenFavorites || screen === root.screenFavoriteSystems || screen === root.screenRecents || screen === root.screenSettings || screen === root.screenAbout)
             return true;
         return false;
     }
@@ -497,6 +501,8 @@ MainLayout {
             return !Browse.GamesModel.loading;
         if (screen === root.screenFavorites)
             return !Browse.FavoritesModel.loading;
+        if (screen === root.screenFavoriteSystems)
+            return !Browse.FavoriteSystemsModel.loading;
         if (screen === root.screenRecents)
             return !Browse.RecentsModel.loading;
         return true;
@@ -548,6 +554,7 @@ MainLayout {
     property var _categoryReadyCallback: null
     property var _systemReadyCallback: null
     property var _favoritesReadyCallback: null
+    property var _favoriteSystemsReadyCallback: null
     property var _recentsReadyCallback: null
     property string _catalogWaitCategory: ""
     // Set when `_ensureCategory` arms `deferredCategorySetTimer` and
@@ -562,6 +569,7 @@ MainLayout {
     readonly property bool _systemsModelConnectionsEnabled: root.systemsScreenRequested || (root._firstFrameSeen && root._startupRestorePending) || root._categoryReadyCallback !== null || root._deferredCategoryPending || root._catalogWaitCategory !== ""
     readonly property bool _gamesModelConnectionsEnabled: root.gamesScreenRequested || root._systemReadyCallback !== null || root._deferredSystemPending
     readonly property bool _favoritesModelConnectionsEnabled: root.favoritesScreenRequested || root._favoritesReadyCallback !== null
+    readonly property bool _favoriteSystemsModelConnectionsEnabled: root.favoriteSystemsScreenRequested || root._favoriteSystemsReadyCallback !== null
     readonly property bool _recentsModelConnectionsEnabled: root.recentsScreenRequested || root._recentsReadyCallback !== null || root._pendingResumeLaunch
     // Saved games-screen entry path that wasn't on the freshly seeded
     // page 1 of MediaBrowse. The GamesModel.onCountChanged watcher
@@ -640,6 +648,8 @@ MainLayout {
         }
         if (root.pendingTransition === "favorites")
             favoritesTransitionTimer.restart();
+        else if (root.pendingTransition === "favorite_systems")
+            favoriteSystemsTransitionTimer.restart();
         else if (root.pendingTransition === "recents")
             recentsTransitionTimer.restart();
         else if (root.pendingTransition === "settings")
@@ -735,6 +745,21 @@ MainLayout {
                 return;
             }
             root._favoritesReadyCallback = null;
+            cb();
+            root._maybeCompleteBackTransition();
+        }
+    }
+    Connections {
+        target: root._favoriteSystemsModelConnectionsEnabled ? Browse.FavoriteSystemsModel : null
+        function onLoadingChanged(): void {
+            if (Browse.FavoriteSystemsModel.loading)
+                return;
+            const cb = root._favoriteSystemsReadyCallback;
+            if (cb === null) {
+                root._maybeCompleteBackTransition();
+                return;
+            }
+            root._favoriteSystemsReadyCallback = null;
             cb();
             root._maybeCompleteBackTransition();
         }
@@ -914,9 +939,44 @@ MainLayout {
         });
     }
 
-    function _navigateToFavorites(): void {
+    function _setFavoritesSystem(systemId): void {
+        const normalized = systemId === undefined || systemId === null ? "" : String(systemId);
+        root.favoritesSystemId = normalized;
+        Browse.FavoritesModel.set_system(normalized);
+    }
+
+    function _navigateToFavorites(systemId): void {
+        root._setFavoritesSystem(systemId);
         root.pendingTransition = "favorites";
         favoritesTransitionTimer.restart();
+    }
+
+    function _completeFavoriteSystemsTransition(): void {
+        if (root.pendingTransition !== "favorite_systems")
+            return;
+        root.favoriteSystemsScreen.restoreSelection();
+        root._completeTransition(root.screenFavoriteSystems);
+    }
+
+    function _startFavoriteSystemsTransitionLoad(): void {
+        if (root.pendingTransition !== "favorite_systems")
+            return;
+        root._whenScreenReady(root.screenFavoriteSystems, function () {
+            if (root.pendingTransition !== "favorite_systems")
+                return;
+            if (root._catalogStillBooting())
+                return;
+            if (!Browse.FavoriteSystemsModel.loading) {
+                root._completeFavoriteSystemsTransition();
+                return;
+            }
+            root._favoriteSystemsReadyCallback = root._completeFavoriteSystemsTransition;
+        });
+    }
+
+    function _navigateToFavoriteSystems(): void {
+        root.pendingTransition = "favorite_systems";
+        favoriteSystemsTransitionTimer.restart();
     }
 
     function _completeRecentsTransition(): void {
@@ -1203,6 +1263,8 @@ MainLayout {
             return;
         }
         if (targetScreen === root.screenFavorites) {
+            const restoredSystemId = Browse.Settings.favorites_grouped ? Browse.FavoriteSystemsState.selected_path : "";
+            root._setFavoritesSystem(restoredSystemId);
             root._whenScreenReady(root.screenFavorites, function () {
                 root._resumeFavoritesCovers();
                 if (Browse.FavoritesModel.loading) {
@@ -1215,6 +1277,22 @@ MainLayout {
                     root.favoritesScreen.restoreSelection();
                     root._finishStartupRestore();
                     root._goto(root.screenFavorites);
+                }
+            });
+            return;
+        }
+        if (targetScreen === root.screenFavoriteSystems) {
+            root._whenScreenReady(root.screenFavoriteSystems, function () {
+                if (Browse.FavoriteSystemsModel.loading) {
+                    root._favoriteSystemsReadyCallback = function () {
+                        root.favoriteSystemsScreen.restoreSelection();
+                        root._finishStartupRestore();
+                        root._goto(root.screenFavoriteSystems);
+                    };
+                } else {
+                    root.favoriteSystemsScreen.restoreSelection();
+                    root._finishStartupRestore();
+                    root._goto(root.screenFavoriteSystems);
                 }
             });
             return;
@@ -1324,6 +1402,7 @@ MainLayout {
     onSystemsScreenChanged: root._flushScreenReady(root.screenSystems)
     onGamesScreenChanged: root._flushScreenReady(root.screenGames)
     onFavoritesScreenChanged: root._flushScreenReady(root.screenFavorites)
+    onFavoriteSystemsScreenChanged: root._flushScreenReady(root.screenFavoriteSystems)
     onRecentsScreenChanged: root._flushScreenReady(root.screenRecents)
     onSettingsScreenChanged: root._flushScreenReady(root.screenSettings)
     onAboutScreenChanged: root._flushScreenReady(root.screenAbout)
@@ -1337,7 +1416,10 @@ MainLayout {
             root.openQuitConfirmModal();
         }
         function onRequestFavoritesScreen(): void {
-            root._navigateToFavorites();
+            if (Browse.Settings.favorites_grouped)
+                root._navigateToFavoriteSystems();
+            else
+                root._navigateToFavorites("");
         }
         function onRequestRecentsScreen(): void {
             root._navigateToRecents();
@@ -1358,13 +1440,32 @@ MainLayout {
     Connections {
         target: root.favoritesScreen
         function onRequestHubScreen(): void {
-            root._navigateBackToScreen(root.screenHub);
+            if (root.favoritesSystemId !== "" && Browse.Settings.favorites_grouped)
+                root._navigateBackToScreen(root.screenFavoriteSystems);
+            else
+                root._navigateBackToScreen(root.screenHub);
         }
         function onRequestContextMenu(index: int, anchorRect): void {
             root.openContextMenu("favorites", index, anchorRect);
         }
         function onRequestPageMenu(): void {
             root.openFavoritesPageMenu();
+        }
+    }
+    Connections {
+        target: root.favoriteSystemsScreen
+        function onRequestAccept(systemId: string): void {
+            if (systemId !== "")
+                root._navigateToFavorites(systemId);
+        }
+        function onRequestHubScreen(): void {
+            root._navigateBackToScreen(root.screenHub);
+        }
+        function onRequestContextMenu(index: int, anchorRect): void {
+            root.openContextMenu("favorite_systems", index, anchorRect);
+        }
+        function onRequestPageMenu(): void {
+            root.openFavoriteSystemsPageMenu();
         }
     }
     Connections {
@@ -1603,6 +1704,14 @@ MainLayout {
             }
             return entries;
         }
+        if (owner === "favorite_systems") {
+            return [
+                {
+                    id: "launch_random_favorite_system",
+                    label: qsTr("Random game")
+                }
+            ];
+        }
         if (owner === "hub_favorites") {
             return [
                 {
@@ -1741,6 +1850,10 @@ MainLayout {
                 return;
             mediaCapable = true;
             isFavorite = Browse.FavoritesModel.is_favorite_at(index);
+        } else if (owner === "favorite_systems") {
+            if (index >= Browse.FavoriteSystemsModel.count)
+                return;
+            systemId = Browse.FavoriteSystemsModel.system_id_at(index);
         } else if (owner === "recents") {
             if (index >= Browse.RecentsModel.count)
                 return;
@@ -1844,6 +1957,10 @@ MainLayout {
             }
         } else if (id === "launch_random_favorite") {
             Browse.FavoritesModel.launch_random();
+        } else if (id === "launch_random_favorite_system") {
+            const systemId = Browse.FavoriteSystemsModel.system_id_at(targetIndex);
+            if (systemId !== "")
+                Browse.FavoritesModel.launch_random_for_system(systemId);
         } else if (id === "index_system") {
             const systemId = Browse.SystemsModel.system_id_at(targetIndex);
             if (systemId !== "")
@@ -2254,7 +2371,8 @@ MainLayout {
         root.openListPickerModal(qsTr("Show"), entries, active, "games_filter_pick");
     }
 
-    // Favorites View controls Core-backed ordering and tagged random launch.
+    // Favorites View controls Core-backed ordering, random launch, and the
+    // grouping preference shared with Favorite Systems.
     function openFavoritesPageMenu(): void {
         const entries = [
             {
@@ -2262,11 +2380,44 @@ MainLayout {
                 "label": qsTr("Sort: %1").arg(root._favoritesSortLabel())
             },
             {
+                "id": "favorites_mode",
+                "label": qsTr("Group by: %1").arg(root._favoritesGroupingLabel())
+            },
+            {
                 "id": "launch_random_favorite",
                 "label": qsTr("Random favorite")
             }
         ];
         root.openListPickerModal(qsTr("View"), entries, "favorites_sort", "page_menu_favorites");
+    }
+
+    function openFavoriteSystemsPageMenu(): void {
+        const entries = [
+            {
+                "id": "favorites_mode",
+                "label": qsTr("Group by: %1").arg(root._favoritesGroupingLabel())
+            }
+        ];
+        root.openListPickerModal(qsTr("View"), entries, "favorites_mode", "page_menu_favorite_systems");
+    }
+
+    function _favoritesGroupingLabel(): string {
+        return Browse.Settings.favorites_grouped ? qsTr("System") : qsTr("None");
+    }
+
+    function openFavoritesModeMenu(): void {
+        const entries = [
+            {
+                "id": "flat",
+                "label": qsTr("None")
+            },
+            {
+                "id": "grouped",
+                "label": qsTr("System")
+            }
+        ];
+        const active = Browse.Settings.favorites_grouped ? "grouped" : "flat";
+        root.openListPickerModal(qsTr("Group by"), entries, active, "favorites_mode_pick");
     }
 
     function _favoritesSortLabel(): string {
@@ -2498,6 +2649,26 @@ MainLayout {
                 root.openFavoritesSortMenu();
             else if (selectedId === "launch_random_favorite")
                 Browse.FavoritesModel.launch_random();
+            else if (selectedId === "favorites_mode")
+                root.openFavoritesModeMenu();
+            return;
+        }
+        if (fieldId === "page_menu_favorite_systems") {
+            root.closeListPickerModal();
+            if (selectedId === "favorites_mode")
+                root.openFavoritesModeMenu();
+            return;
+        }
+        if (fieldId === "favorites_mode_pick") {
+            root.closeListPickerModal();
+            const grouped = selectedId === "grouped";
+            if (Browse.Settings.favorites_grouped === grouped)
+                return;
+            Browse.Settings.set_favorites_grouped(grouped);
+            if (grouped)
+                root._navigateToFavoriteSystems();
+            else
+                root._navigateToFavorites("");
             return;
         }
         if (fieldId === "favorites_sort_pick") {
@@ -2797,6 +2968,9 @@ MainLayout {
         } else if (root.activeScreen === root.screenFavorites) {
             if (root.favoritesScreen !== null)
                 root.favoritesScreen.handleAction(action);
+        } else if (root.activeScreen === root.screenFavoriteSystems) {
+            if (root.favoriteSystemsScreen !== null)
+                root.favoriteSystemsScreen.handleAction(action);
         } else if (root.activeScreen === root.screenRecents) {
             if (root.recentsScreen !== null)
                 root.recentsScreen.handleAction(action);
@@ -2895,6 +3069,24 @@ MainLayout {
         target: root.favoritesScreen
         property: "detailRapidScrollAction"
         value: root.activeScreen === root.screenFavorites ? root.rapidNavigationAction : ""
+    }
+
+    Binding {
+        target: root.favoriteSystemsScreen
+        property: "detailRapidScrollActive"
+        value: root.activeScreen === root.screenFavoriteSystems && root.rapidNavigationActive
+    }
+
+    Binding {
+        target: root.favoriteSystemsScreen
+        property: "detailRapidIndicatorActive"
+        value: root.activeScreen === root.screenFavoriteSystems && root.rapidNavigationIndicatorActive
+    }
+
+    Binding {
+        target: root.favoriteSystemsScreen
+        property: "detailRapidScrollAction"
+        value: root.activeScreen === root.screenFavoriteSystems ? root.rapidNavigationAction : ""
     }
 
     Binding {
@@ -3348,6 +3540,13 @@ MainLayout {
         interval: 50
         repeat: false
         onTriggered: root._startFavoritesTransitionLoad()
+    }
+
+    Timer {
+        id: favoriteSystemsTransitionTimer
+        interval: 50
+        repeat: false
+        onTriggered: root._startFavoriteSystemsTransitionLoad()
     }
 
     Timer {
