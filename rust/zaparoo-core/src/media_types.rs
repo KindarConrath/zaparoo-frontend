@@ -35,6 +35,10 @@ pub struct SystemInfo {
     pub release_date: Option<String>,
     #[serde(default)]
     pub manufacturer: Option<String>,
+    /// Exact matching media count when Core could calculate it. Tagged
+    /// `systems` requests return only positive-count systems.
+    #[serde(default)]
+    pub media_count: Option<u32>,
     /// `zaparoo://...` launch URI for launch-only "virtual" systems
     /// (Core's launchables). Empty for normal indexed systems. When
     /// present, the system must be launched by running this script
@@ -1106,8 +1110,14 @@ pub struct ReadersWriteParams {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct SystemsParams {}
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemsParams {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub all: Option<bool>,
+}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SystemsResult {
@@ -1183,8 +1193,8 @@ mod tests {
         MediaIndexParams, MediaLookupParams, MediaLookupResult, MediaMetaParams, MediaMetaResult,
         MediaResult, MediaScrapeParams, MediaSearchParams, MediaSearchResult, MediaTagsParams,
         MediaTagsResult, ReaderInfo, ReadersResult, ScrapersResult, ScrapingStatusResponse,
-        SettingsResult, SystemDefault, SystemsResult, TagInfo, TokensHistoryResult, TokensResult,
-        UpdateSettingsParams, VersionResult,
+        SettingsResult, SystemDefault, SystemsParams, SystemsResult, TagInfo, TokensHistoryResult,
+        TokensResult, UpdateSettingsParams, VersionResult,
     };
 
     #[test]
@@ -1222,18 +1232,37 @@ mod tests {
 
     #[test]
     fn systems_result_deserialises_camelcase_payload() {
-        let json = r#"{"systems":[{"id":"NES","name":"Nintendo","category":"Consoles"}]}"#;
+        let json =
+            r#"{"systems":[{"id":"NES","name":"Nintendo","category":"Consoles","mediaCount":42}]}"#;
         let result: SystemsResult = serde_json::from_str(json).expect("parse");
         assert_eq!(result.systems.len(), 1);
         assert_eq!(result.systems[0].id, "NES");
         assert_eq!(result.systems[0].category, "Consoles");
+        assert_eq!(result.systems[0].media_count, Some(42));
     }
 
     #[test]
-    fn system_info_category_defaults_to_empty_when_missing() {
+    fn systems_params_omit_defaults_and_serialize_scope() {
+        assert_eq!(
+            serde_json::to_value(SystemsParams::default()).expect("serialize"),
+            serde_json::json!({}),
+        );
+        assert_eq!(
+            serde_json::to_value(SystemsParams {
+                tags: vec!["user:favorite".into()],
+                all: Some(true),
+            })
+            .expect("serialize"),
+            serde_json::json!({"tags": ["user:favorite"], "all": true}),
+        );
+    }
+
+    #[test]
+    fn system_info_category_and_count_default_when_missing() {
         let json = r#"{"systems":[{"id":"x","name":"X"}]}"#;
         let result: SystemsResult = serde_json::from_str(json).expect("parse");
         assert_eq!(result.systems[0].category, "");
+        assert_eq!(result.systems[0].media_count, None);
     }
 
     #[test]

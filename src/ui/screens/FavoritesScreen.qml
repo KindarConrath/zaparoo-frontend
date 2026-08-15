@@ -23,6 +23,8 @@ MediaListScreen {
     id: favorites
 
     property alias favoritesGrid: favorites.mediaGrid
+    property string selectedSystemId: ""
+    readonly property int favoriteTotal: Browse.FavoritesModel.total_items
 
     mediaModel: Browse.FavoritesModel
     mediaState: Browse.FavoritesState
@@ -30,6 +32,15 @@ MediaListScreen {
     emptyText: qsTr("No favorites yet")
     loadingText: qsTr("Loading favorites…")
     detailShowTitle: false
+    totalItemsOverride: favorites.favoriteTotal > 0 ? favorites.favoriteTotal : -1
+    gridTotalItemsOverride: favorites.favoriteTotal > 0 ? favorites.favoriteTotal : -1
+    gridHasMorePages: Browse.FavoritesModel.has_next_page
+    topStripTotalPagesProvider: () => favorites.mediaGrid.totalPageCount
+    topStripTotalTextProvider: () => favorites.favoriteTotal >= 0 ? qsTr("%n favorite(s)", "", favorites.favoriteTotal) : ""
+    pageMenuEnabledWhenEmpty: true
+
+    onSelectedSystemIdChanged: Browse.FavoritesModel.set_system(favorites.selectedSystemId)
+    Component.onCompleted: Browse.FavoritesModel.set_system(favorites.selectedSystemId)
 
     Connections {
         target: Browse.FavoritesModel

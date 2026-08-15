@@ -11,6 +11,7 @@ CatalogData {
             category: "Handhelds",
             release_date: None,
             manufacturer: None,
+            media_count: None,
             zap_script: "",
         },
         SystemInfo {
@@ -19,6 +20,7 @@ CatalogData {
             category: "arcade",
             release_date: None,
             manufacturer: None,
+            media_count: None,
             zap_script: "",
         },
         SystemInfo {
@@ -27,6 +29,7 @@ CatalogData {
             category: "Consoles",
             release_date: None,
             manufacturer: None,
+            media_count: None,
             zap_script: "",
         },
         SystemInfo {
@@ -35,6 +38,7 @@ CatalogData {
             category: "",
             release_date: None,
             manufacturer: None,
+            media_count: None,
             zap_script: "",
         },
         SystemInfo {
@@ -43,6 +47,7 @@ CatalogData {
             category: "Consoles",
             release_date: None,
             manufacturer: None,
+            media_count: None,
             zap_script: "",
         },
     ],

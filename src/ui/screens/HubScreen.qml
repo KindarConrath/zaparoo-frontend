@@ -38,8 +38,8 @@ import Zaparoo.Browse as Browse
 // generalizes for any (topCount, bottomCount); see `_mapCrossRow`.
 //
 // Pure input dispatcher: emits one of `requestAccept(payload)`,
-// `requestFavoritesScreen`, `requestRecentsScreen`,
-// `requestUpdateScreen`, `requestSettingsScreen`, or `requestQuit`.
+// `requestFavoritesScreen`, `requestRecentsScreen`, `requestUpdateScreen`,
+// `requestSettingsScreen`, or `requestQuit`.
 //
 // All cross-screen orchestration (model fills, deferred set_category,
 // cover prefetch, transition overlay, screen flip) lives in Main.qml.

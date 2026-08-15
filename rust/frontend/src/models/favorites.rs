@@ -5,10 +5,11 @@
 // `Browse.FavoritesModel` — flat list of favorite media, surfaced
 // from Core's `media.search` endpoint.
 //
-// Page 1 uses a sort-scoped `MediaFavoritesEndpoint` subscription so a
-// cached result can seed first paint synchronously. Cursor follow-ups call
-// `Client::media_search` directly with the same sort. Separate scope and
-// cursor tickets reject callbacks from superseded subscriptions or page chains.
+// Page 1 uses a sort- and system-scoped `MediaFavoritesEndpoint`
+// subscription so cached results can seed first paint synchronously. Cursor
+// follow-ups call `Client::media_search` directly with the same scope. Separate
+// scope and cursor tickets reject callbacks from superseded subscriptions or
+// page chains.
 //
 // Search stays flat and paginated; frontend never materializes full Favorites
 // set for sorting.
@@ -70,7 +71,6 @@ const PAGE_SIZE: u32 = 25;
 /// keeps the shorter token used by the menu contract.
 const SORT_NAME: &str = "name";
 const CORE_SORT_NAME_ASC: &str = "name-asc";
-const RANDOM_FAVORITE_SCRIPT: &str = "**launch.random:all?tags=user:favorite";
 // How many rows ahead/behind the settled cursor to warm in list-detail
 // layout. Kept small so the 2-worker byte queue stays shallow and the next
 // cover is fetched first within ~250 ms.
@@ -92,6 +92,9 @@ pub struct FavoritesModelRust {
     disambig_displays: Vec<String>,
     // "" = Core's established order, "name" = Core `name-asc`.
     sort_mode: QString,
+    // Empty = all favorite media; otherwise scope every page and random
+    // action to this canonical Core system ID.
+    current_system_id: QString,
     count: i32,
     loading: bool,
     loading_more: bool,
@@ -161,6 +164,7 @@ impl Default for FavoritesModelRust {
             entries: Vec::new(),
             disambig_displays: Vec::new(),
             sort_mode: QString::default(),
+            current_system_id: QString::default(),
             count: 0,
             loading: false,
             loading_more: false,
@@ -232,6 +236,7 @@ pub mod ffi {
         #[qproperty(bool, cover_requests_paused)]
         #[qproperty(bool, show_original_filenames, READ, WRITE = set_show_original_filenames, NOTIFY)]
         #[qproperty(QString, sort_mode, READ, WRITE = set_sort_mode, NOTIFY)]
+        #[qproperty(QString, current_system_id)]
         type FavoritesModel = super::FavoritesModelRust;
 
         #[qinvokable]
@@ -241,6 +246,9 @@ pub mod ffi {
         fn set_sort_mode(self: Pin<&mut FavoritesModel>, value: &QString);
 
         #[qinvokable]
+        fn set_system(self: Pin<&mut FavoritesModel>, system_id: &QString);
+
+        #[qinvokable]
         fn launch_at(self: Pin<&mut FavoritesModel>, index: i32);
 
         #[qinvokable]
@@ -248,6 +256,9 @@ pub mod ffi {
 
         #[qinvokable]
         fn launch_random(self: Pin<&mut FavoritesModel>);
+
+        #[qinvokable]
+        fn launch_random_for_system(self: Pin<&mut FavoritesModel>, system_id: &QString);
 
         #[qinvokable]
         fn clear_random_error(self: Pin<&mut FavoritesModel>);
@@ -519,15 +530,16 @@ impl ffi::FavoritesModel {
         self.entries.get(row)
     }
 
-    /// Subscribe to page 1 for current sort scope. Replacing sort aborts prior
-    /// watcher and invalidates callbacks already queued onto Qt thread.
+    /// Subscribe to page 1 for current sort and system scope. Replacing either
+    /// aborts the prior watcher and invalidates callbacks queued onto Qt thread.
     fn start_subscription(mut self: Pin<&mut Self>) {
         if let Some(handle) = self.as_mut().rust_mut().watcher.take() {
             handle.abort();
         }
         let sort = core_sort_for_mode(&self.sort_mode.to_string());
-        let resource =
-            global_store().subscribe::<MediaFavoritesEndpoint>(FavoritesArgs::new(PAGE_SIZE, sort));
+        let systems = favorites_system_scope(&self.current_system_id.to_string());
+        let resource = global_store()
+            .subscribe::<MediaFavoritesEndpoint>(FavoritesArgs::new(PAGE_SIZE, sort, systems));
         let mut status_rx = resource.subscribe();
         let snapshot = status_rx.borrow_and_update().clone();
         let scope_seq = self.rust().scope_seq.clone();
@@ -565,6 +577,17 @@ impl ffi::FavoritesModel {
         }
         self.as_mut().rust_mut().sort_mode = QString::from(normalized);
         self.as_mut().sort_mode_changed();
+        self.start_subscription();
+    }
+
+    /// Replace Favorites system scope. Empty restores flat all-systems mode.
+    fn set_system(mut self: Pin<&mut Self>, system_id: &QString) {
+        let normalized = system_id.to_string().trim().to_string();
+        if self.current_system_id.to_string() == normalized {
+            return;
+        }
+        self.as_mut()
+            .set_current_system_id(QString::from(normalized.as_str()));
         self.start_subscription();
     }
 
@@ -627,12 +650,14 @@ impl ffi::FavoritesModel {
         let ticket = seq.load(Ordering::SeqCst);
         self.as_mut().set_loading_more(true);
         let sort = core_sort_for_mode(&self.sort_mode.to_string());
+        let systems = favorites_system_scope(&self.current_system_id.to_string());
         let qt_thread = self.qt_thread();
         let store = global_store();
         global_handle().spawn(async move {
             let result = store
                 .client()
                 .media_search(MediaSearchParams {
+                    systems,
                     max_results: Some(PAGE_SIZE),
                     cursor,
                     tags: vec!["user:favorite".into()],
@@ -681,33 +706,15 @@ impl ffi::FavoritesModel {
         QString::from(portable_text_for_entry(entry).as_str())
     }
 
-    /// Ask Core to choose uniformly from all media carrying favorite tag.
-    fn launch_random(mut self: Pin<&mut Self>) {
-        if !self.random_error.is_empty() {
-            self.as_mut().set_random_error(QString::default());
-        }
-        let seq = self.rust().random_seq.clone();
-        let ticket = seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let qt_thread = self.qt_thread();
-        let store = global_store();
-        global_handle().spawn(async move {
-            let result = store
-                .run_mutation::<RunMutation>(RunParams {
-                    text: RANDOM_FAVORITE_SCRIPT.to_string(),
-                })
-                .await;
-            let _ = qt_thread.queue(move |mut model| {
-                if seq.load(Ordering::SeqCst) != ticket {
-                    return;
-                }
-                if let Err(error) = result {
-                    warn!("Core random favorite launch failed: {}", error.message);
-                    model
-                        .as_mut()
-                        .set_random_error(QString::from(error.message.as_str()));
-                }
-            });
-        });
+    /// Ask Core to choose uniformly from favorite media in current scope.
+    fn launch_random(self: Pin<&mut Self>) {
+        let system_id = self.current_system_id.to_string();
+        launch_random_favorite(self, &system_id);
+    }
+
+    /// Ask Core to choose a favorite from one system without loading its rows.
+    fn launch_random_for_system(self: Pin<&mut Self>, system_id: &QString) {
+        launch_random_favorite(self, system_id.to_string().trim());
     }
 
     fn clear_random_error(mut self: Pin<&mut Self>) {
@@ -1747,6 +1754,55 @@ fn portable_text_for_entry(entry: &MediaItem) -> String {
     entry.path.clone()
 }
 
+fn favorites_system_scope(system_id: &str) -> Vec<String> {
+    let system_id = system_id.trim();
+    if system_id.is_empty() {
+        Vec::new()
+    } else {
+        vec![system_id.to_string()]
+    }
+}
+
+fn launch_random_favorite(mut model: Pin<&mut ffi::FavoritesModel>, system_id: &str) {
+    if !model.random_error.is_empty() {
+        model.as_mut().set_random_error(QString::default());
+    }
+    let seq = model.rust().random_seq.clone();
+    let ticket = seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let qt_thread = model.qt_thread();
+    let store = global_store();
+    let text = random_favorite_script(system_id);
+    global_handle().spawn(async move {
+        let result = store.run_mutation::<RunMutation>(RunParams { text }).await;
+        let _ = qt_thread.queue(move |mut model| {
+            if seq.load(Ordering::SeqCst) != ticket {
+                return;
+            }
+            if let Err(error) = result {
+                warn!("Core random favorite launch failed: {}", error.message);
+                model
+                    .as_mut()
+                    .set_random_error(QString::from(error.message.as_str()));
+            }
+        });
+    });
+}
+
+fn random_favorite_script(system_id: &str) -> String {
+    let scope = system_id.trim();
+    if scope.is_empty() {
+        return "**launch.random:all?tags=user:favorite".to_string();
+    }
+    let mut escaped = String::with_capacity(scope.len());
+    for ch in scope.chars() {
+        if matches!(ch, '^' | '?' | ',' | '&' | '|') {
+            escaped.push('^');
+        }
+        escaped.push(ch);
+    }
+    format!("**launch.random:{escaped}?tags=user:favorite")
+}
+
 fn position_of_path(entries: &[MediaItem], needle: &str) -> i32 {
     if needle.is_empty() {
         return -1;
@@ -1829,10 +1885,18 @@ mod tests {
     }
 
     #[test]
-    fn random_favorite_uses_core_tag_scope() {
+    fn random_favorite_uses_current_core_scope() {
         assert_eq!(
-            RANDOM_FAVORITE_SCRIPT,
+            random_favorite_script(""),
             "**launch.random:all?tags=user:favorite"
+        );
+        assert_eq!(
+            random_favorite_script("SNES"),
+            "**launch.random:SNES?tags=user:favorite"
+        );
+        assert_eq!(
+            random_favorite_script("Odd?,System"),
+            "**launch.random:Odd^?^,System?tags=user:favorite"
         );
     }
 

@@ -34,7 +34,7 @@ impl Endpoint for CatalogEndpoint {
         _args: Self::Args,
     ) -> BoxFuture<'static, Result<Self::Output, ClientError>> {
         Box::pin(async move {
-            let result = client.systems(SystemsParams {}).await?;
+            let result = client.systems(SystemsParams::default()).await?;
             Ok(shape_catalog(result.systems))
         })
     }

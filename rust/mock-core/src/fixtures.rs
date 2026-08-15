@@ -13,6 +13,19 @@ use std::sync::{Mutex, OnceLock};
 
 static SYSTEM_DEFAULTS: OnceLock<Mutex<Vec<SystemDefaultFixture>>> = OnceLock::new();
 
+const MOCK_SYSTEMS: &[(&str, &str, &str)] = &[
+    ("NES", "Nintendo Entertainment System", "Consoles"),
+    ("SNES", "Super Nintendo", "Consoles"),
+    ("Genesis", "Sega Genesis", "Consoles"),
+    ("Nintendo64", "Nintendo 64", "Consoles"),
+    ("Gameboy", "Game Boy", "Handhelds"),
+    ("GameboyColor", "Game Boy Color", "Handhelds"),
+    ("GBA", "Game Boy Advance", "Handhelds"),
+    ("NDS", "Nintendo DS", "Handhelds"),
+    ("MAME", "MAME", "Arcade"),
+    ("NeoGeo", "Neo Geo", "Arcade"),
+];
+
 #[derive(Clone)]
 struct SystemDefaultFixture {
     system: String,
@@ -111,21 +124,39 @@ fn system_defaults() -> &'static Mutex<Vec<SystemDefaultFixture>> {
     })
 }
 
-pub fn systems_response() -> Value {
-    json!({
-        "systems": [
-            { "id": "NES",          "name": "Nintendo Entertainment System", "category": "Consoles" },
-            { "id": "SNES",         "name": "Super Nintendo",                "category": "Consoles" },
-            { "id": "Genesis",      "name": "Sega Genesis",                  "category": "Consoles" },
-            { "id": "Nintendo64",   "name": "Nintendo 64",                   "category": "Consoles" },
-            { "id": "Gameboy",      "name": "Game Boy",                      "category": "Handhelds" },
-            { "id": "GameboyColor", "name": "Game Boy Color",                "category": "Handhelds" },
-            { "id": "GBA",          "name": "Game Boy Advance",              "category": "Handhelds" },
-            { "id": "NDS",          "name": "Nintendo DS",                   "category": "Handhelds" },
-            { "id": "MAME",         "name": "MAME",                          "category": "Arcade" },
-            { "id": "NeoGeo",       "name": "Neo Geo",                       "category": "Arcade" },
-        ]
-    })
+pub fn systems_response(params: &Value) -> Value {
+    let tags = params
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let systems = MOCK_SYSTEMS
+        .iter()
+        .copied()
+        .filter_map(|(id, name, category)| {
+            let media_count = ALL_GAMES
+                .iter()
+                .enumerate()
+                .filter(|(index, (_, file, system))| {
+                    *system == id
+                        && tags.iter().all(|tag| {
+                            let game = json!({ "tags": tags_for(file, *index) });
+                            game_has_tag(&game, tag)
+                        })
+                })
+                .count();
+            if !tags.is_empty() && media_count == 0 {
+                return None;
+            }
+            Some(json!({
+                "id": id,
+                "name": name,
+                "category": category,
+                "mediaCount": media_count,
+            }))
+        })
+        .collect::<Vec<_>>();
+    json!({ "systems": systems })
 }
 
 pub fn media_search_response(params: &Value) -> Value {
@@ -422,24 +453,13 @@ fn games_for_systems<'a>(systems: &'a [&'a str]) -> impl Iterator<Item = Value> 
         })
 }
 
-/// Display name and category for a mock system id, mirroring
-/// `systems_response` so search rows and the systems catalog agree.
-/// Unknown ids fall back to the id itself with an empty category, which is
-/// what a client sees for media outside the catalog.
+/// Display name and category for a mock system id. Unknown ids use an
+/// `Unknown` display name and an empty category.
 fn system_meta(system: &str) -> (&'static str, &'static str) {
-    match system {
-        "NES" => ("Nintendo Entertainment System", "Consoles"),
-        "SNES" => ("Super Nintendo", "Consoles"),
-        "Genesis" => ("Sega Genesis", "Consoles"),
-        "Nintendo64" => ("Nintendo 64", "Consoles"),
-        "Gameboy" => ("Game Boy", "Handhelds"),
-        "GameboyColor" => ("Game Boy Color", "Handhelds"),
-        "GBA" => ("Game Boy Advance", "Handhelds"),
-        "NDS" => ("Nintendo DS", "Handhelds"),
-        "MAME" => ("MAME", "Arcade"),
-        "NeoGeo" => ("Neo Geo", "Arcade"),
-        _ => ("Unknown", ""),
-    }
+    MOCK_SYSTEMS
+        .iter()
+        .find_map(|(id, name, category)| (*id == system).then_some((*name, *category)))
+        .unwrap_or(("Unknown", ""))
 }
 
 /// Full tag list for a search row: the disambiguation tags plus, for every
