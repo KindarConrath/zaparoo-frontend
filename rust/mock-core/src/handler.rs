@@ -64,6 +64,7 @@ pub fn dispatch(text: &str) -> String {
         "media.search" => Some(fixtures::media_search_response(&req.params)),
         "media.browse" => Some(fixtures::media_browse_response(&req.params)),
         "media.browse.index" => Some(fixtures::media_browse_index_response(&req.params)),
+        "media.meta" => Some(fixtures::media_meta_response(&req.params)),
         "media.history" => Some(fixtures::media_history_response(&req.params)),
         "media.history.latest" => Some(fixtures::media_history_latest_response()),
         "run" => {
@@ -189,6 +190,7 @@ mod tests {
         assert!(results
             .iter()
             .all(|g| g["system"]["id"].as_str() == Some("NES")));
+        assert!(results.iter().all(|g| g["hasCover"].is_boolean()));
     }
 
     #[test]
@@ -359,6 +361,17 @@ mod tests {
     }
 
     #[test]
+    fn media_meta_preserves_batch_order() {
+        let req = r#"{"jsonrpc":"2.0","id":"1","method":"media.meta","params":{"items":[{"system":"NES","path":"/games/first.nes"},{"mediaId":42}]}}"#;
+        let resp = parse(&dispatch(req));
+        let items = resp["result"]["items"].as_array().expect("items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["media"]["path"], "/games/first.nes");
+        assert_eq!(items[0]["media"]["title"]["system"]["id"], "NES");
+        assert_eq!(items[1]["media"]["path"], "/mock/media/42");
+    }
+
+    #[test]
     fn run_accepts_any_text_and_returns_null() {
         let req =
             r#"{"jsonrpc":"2.0","id":"1","method":"run","params":{"text":"**launch.system:nes"}}"#;
@@ -381,22 +394,55 @@ mod tests {
     }
 
     #[test]
-    fn media_history_returns_entries_with_pagination() {
-        let req = r#"{"jsonrpc":"2.0","id":"1","method":"media.history","params":{"limit":5}}"#;
-        let resp = parse(&dispatch(req));
-        let entries = resp["result"]["entries"].as_array().expect("array");
-        assert!(!entries.is_empty());
-        for entry in entries {
+    fn media_history_returns_cursor_pages() {
+        let first_req = r#"{"jsonrpc":"2.0","id":"1","method":"media.history","params":{"limit":5,"distinctMedia":true}}"#;
+        let first = parse(&dispatch(first_req));
+        let first_entries = first["result"]["entries"].as_array().expect("array");
+        assert_eq!(first_entries.len(), 5);
+        for entry in first_entries {
             assert!(entry["mediaName"].is_string());
             assert!(entry["mediaPath"].is_string());
             assert!(entry["systemId"].is_string());
             assert!(entry["systemName"].is_string());
             assert!(entry["launcherId"].is_string());
+            assert!(entry["hasCover"].is_boolean());
         }
-        let pagination = resp["result"]["pagination"]
+        let pagination = first["result"]["pagination"]
             .as_object()
             .expect("pagination object");
-        assert_eq!(pagination["hasNextPage"], Value::Bool(false));
+        assert_eq!(pagination["hasNextPage"], Value::Bool(true));
+        assert_eq!(pagination["nextCursor"], Value::String("5".into()));
+
+        let next_req = r#"{"jsonrpc":"2.0","id":"2","method":"media.history","params":{"limit":5,"cursor":"5","distinctMedia":true}}"#;
+        let next = parse(&dispatch(next_req));
+        let next_entries = next["result"]["entries"].as_array().expect("array");
+        assert!(!next_entries.is_empty());
+        let first_paths = first_entries
+            .iter()
+            .map(|entry| entry["mediaPath"].as_str().expect("first path"))
+            .collect::<std::collections::HashSet<_>>();
+        assert!(next_entries.iter().all(|entry| {
+            !first_paths.contains(entry["mediaPath"].as_str().expect("next path"))
+        }));
+    }
+
+    #[test]
+    fn media_history_honors_distinct_media_before_paging() {
+        let repeated_req = r#"{"jsonrpc":"2.0","id":"1","method":"media.history","params":{"limit":2,"distinctMedia":false}}"#;
+        let repeated = parse(&dispatch(repeated_req));
+        let repeated_entries = repeated["result"]["entries"].as_array().expect("array");
+        assert_eq!(
+            repeated_entries[0]["mediaPath"],
+            repeated_entries[1]["mediaPath"]
+        );
+
+        let distinct_req = r#"{"jsonrpc":"2.0","id":"2","method":"media.history","params":{"limit":2,"distinctMedia":true}}"#;
+        let distinct = parse(&dispatch(distinct_req));
+        let distinct_entries = distinct["result"]["entries"].as_array().expect("array");
+        assert_ne!(
+            distinct_entries[0]["mediaPath"],
+            distinct_entries[1]["mediaPath"]
+        );
     }
 
     #[test]

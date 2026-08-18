@@ -92,7 +92,7 @@ pub struct TagInfo {
     pub label: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaItem {
     /// Opaque media database row ID. Treat as ephemeral — valid only
@@ -120,6 +120,27 @@ pub struct MediaItem {
     /// indexed root).
     #[serde(default)]
     pub relative_path: Option<String>,
+    /// False only when Core has confirmed no media- or title-level image
+    /// property. Missing on older Core builds, where the frontend must still
+    /// probe `media.image`.
+    #[serde(default = "default_true")]
+    pub has_cover: bool,
+}
+
+impl Default for MediaItem {
+    fn default() -> Self {
+        Self {
+            media_id: None,
+            name: String::new(),
+            path: String::new(),
+            zap_script: String::new(),
+            system: System::default(),
+            tags: Vec::new(),
+            disambiguating_tags: Vec::new(),
+            relative_path: None,
+            has_cover: true,
+        }
+    }
 }
 
 /// System sub-object returned by `media.search`/`media.lookup`. Mirrors
@@ -417,13 +438,17 @@ pub struct MediaHistoryParams {
     pub cursor: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub systems: Vec<String>,
+    /// Ask Core to return only the newest session for each
+    /// `(systemId, mediaPath)` identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distinct_media: Option<bool>,
 }
 
 /// One entry in `media.history`. Field shapes mirror Core's docs; we
 /// don't need `started_at`/`ended_at`/`play_time` for the launch UI yet
 /// but keep them deserialised so future "most-played" / "last-played"
 /// captions don't need a re-roundtrip.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaHistoryEntry {
     /// Opaque media database row ID. Omitted when the history path
@@ -449,6 +474,28 @@ pub struct MediaHistoryEntry {
     pub ended_at: Option<String>,
     #[serde(default)]
     pub play_time: u64,
+    /// False only when Core has confirmed no media- or title-level image
+    /// property. Missing on older Core builds, where the frontend must still
+    /// probe `media.image`.
+    #[serde(default = "default_true")]
+    pub has_cover: bool,
+}
+
+impl Default for MediaHistoryEntry {
+    fn default() -> Self {
+        Self {
+            media_id: None,
+            system_id: String::new(),
+            system_name: String::new(),
+            media_name: String::new(),
+            media_path: String::new(),
+            launcher_id: String::new(),
+            started_at: String::new(),
+            ended_at: None,
+            play_time: 0,
+            has_cover: true,
+        }
+    }
 }
 
 /// Response envelope for `media.history`. Pagination is "only present
@@ -497,6 +544,9 @@ pub struct MediaHistoryLatestResult {
     pub entry: Option<MediaHistoryLatestEntry>,
 }
 
+pub const MEDIA_IMAGE_DELIVERY_INLINE: &str = "inline";
+pub const MEDIA_IMAGE_DELIVERY_LOCAL_PATH: &str = "localPath";
+
 /// Parameters for single-image `media.image`. Core identifies the
 /// media row by `media_id` when available, otherwise by `(system,
 /// path)` where `path` is the canonical indexed media path returned by
@@ -518,6 +568,10 @@ pub struct MediaImageParams {
     /// returning it. Omit (or send 0) to receive the full-resolution blob.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_size: Option<u32>,
+    /// Requested delivery mode. Omitted for the established inline response;
+    /// `localPath` asks Core for an opaque cached-thumbnail path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
 }
 
 impl MediaImageParams {
@@ -528,6 +582,7 @@ impl MediaImageParams {
             path: path.into(),
             image_types: Vec::new(),
             max_size: None,
+            delivery: None,
         }
     }
 
@@ -538,6 +593,7 @@ impl MediaImageParams {
             path: String::new(),
             image_types: Vec::new(),
             max_size: None,
+            delivery: None,
         }
     }
 }
@@ -545,6 +601,9 @@ impl MediaImageParams {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaImageResult {
+    /// Actual delivery mode. Empty means a legacy Core inline response.
+    #[serde(default)]
+    pub delivery: String,
     #[serde(default)]
     pub content_type: String,
     /// File extension without a leading dot, derived by Core from the
@@ -553,9 +612,12 @@ pub struct MediaImageResult {
     /// `content_type` or the binary payload.
     #[serde(default)]
     pub extension: Option<String>,
-    /// Base64-encoded image bytes.
+    /// Base64-encoded image bytes, present for inline delivery.
     #[serde(default)]
     pub data: String,
+    /// Opaque Core-host thumbnail path, present for local-path delivery.
+    #[serde(default)]
+    pub local_path: Option<String>,
     #[serde(default)]
     pub type_tag: String,
 }
@@ -593,10 +655,48 @@ impl MediaMetaParams {
     }
 }
 
+pub const MEDIA_META_BATCH_MAX_ITEMS: usize = 100;
+
+/// Ordered batch request for `media.meta`. Core accepts one to 100 refs and
+/// returns one response item in the same position for each ref.
+#[derive(Debug, Clone, Serialize)]
+pub struct MediaMetaBatchParams {
+    pub items: Vec<MediaMetaParams>,
+}
+
+impl MediaMetaBatchParams {
+    pub fn try_new(items: Vec<MediaMetaParams>) -> Result<Self, String> {
+        if items.is_empty() {
+            return Err("media.meta batch must contain at least one item".to_string());
+        }
+        if items.len() > MEDIA_META_BATCH_MAX_ITEMS {
+            return Err(format!(
+                "media.meta batch cannot contain more than {MEDIA_META_BATCH_MAX_ITEMS} items"
+            ));
+        }
+        Ok(Self { items })
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaMetaResult {
     pub media: MediaMeta,
+}
+
+/// One ordered batch result. Exactly one of `media` or `error` should be set.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MediaMetaBatchItemResult {
+    #[serde(default)]
+    pub media: Option<MediaMeta>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MediaMetaBatchResult {
+    #[serde(default)]
+    pub items: Vec<MediaMetaBatchItemResult>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1188,13 +1288,15 @@ mod tests {
     use super::{
         BrowseEntry, BrowseIndexGroup, HealthResult, IndexingStatusResponse, LaunchersResult,
         LogDownloadResult, MediaBrowseIndexParams, MediaBrowseIndexResult, MediaBrowseParams,
-        MediaBrowseResult, MediaHistoryLatestResult, MediaHistoryParams, MediaHistoryResult,
-        MediaHistoryTopParams, MediaHistoryTopResult, MediaImageParams, MediaImageResult,
-        MediaIndexParams, MediaLookupParams, MediaLookupResult, MediaMetaParams, MediaMetaResult,
-        MediaResult, MediaScrapeParams, MediaSearchParams, MediaSearchResult, MediaTagsParams,
-        MediaTagsResult, ReaderInfo, ReadersResult, ScrapersResult, ScrapingStatusResponse,
-        SettingsResult, SystemDefault, SystemsParams, SystemsResult, TagInfo, TokensHistoryResult,
-        TokensResult, UpdateSettingsParams, VersionResult,
+        MediaBrowseResult, MediaHistoryEntry, MediaHistoryLatestResult, MediaHistoryParams,
+        MediaHistoryResult, MediaHistoryTopParams, MediaHistoryTopResult, MediaImageParams,
+        MediaImageResult, MediaIndexParams, MediaItem, MediaLookupParams, MediaLookupResult,
+        MediaMetaBatchParams, MediaMetaBatchResult, MediaMetaParams, MediaMetaResult, MediaResult,
+        MediaScrapeParams, MediaSearchParams, MediaSearchResult, MediaTagsParams, MediaTagsResult,
+        ReaderInfo, ReadersResult, ScrapersResult, ScrapingStatusResponse, SettingsResult,
+        SystemDefault, SystemsParams, SystemsResult, TagInfo, TokensHistoryResult, TokensResult,
+        UpdateSettingsParams, VersionResult, MEDIA_IMAGE_DELIVERY_LOCAL_PATH,
+        MEDIA_META_BATCH_MAX_ITEMS,
     };
 
     #[test]
@@ -1771,6 +1873,7 @@ mod tests {
             limit: Some(50),
             cursor: Some("opaque".into()),
             systems: vec!["SNES".into()],
+            distinct_media: Some(true),
         };
         let json = serde_json::to_value(&params).expect("serialise");
         let object = json.as_object().expect("object");
@@ -1789,6 +1892,12 @@ mod tests {
                 .map(Vec::len),
             Some(1)
         );
+        assert_eq!(
+            object
+                .get("distinctMedia")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
         assert!(!object.contains_key("fuzzySystem"));
     }
 
@@ -1804,12 +1913,14 @@ mod tests {
         );
         assert!(!object.contains_key("imageTypes"));
         assert!(!object.contains_key("mediaId"));
+        assert!(!object.contains_key("delivery"));
     }
 
     #[test]
-    fn media_image_params_emits_image_types_when_set() {
+    fn media_image_params_emits_image_types_and_delivery_when_set() {
         let params = MediaImageParams {
             image_types: vec!["boxart".into(), "image".into()],
+            delivery: Some(MEDIA_IMAGE_DELIVERY_LOCAL_PATH.into()),
             ..MediaImageParams::for_media("SNES", "/p")
         };
         let json = serde_json::to_value(&params).expect("serialise");
@@ -1820,6 +1931,10 @@ mod tests {
             .expect("imageTypes array");
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0].as_str(), Some("boxart"));
+        assert_eq!(
+            object.get("delivery").and_then(|v| v.as_str()),
+            Some(MEDIA_IMAGE_DELIVERY_LOCAL_PATH)
+        );
     }
 
     #[test]
@@ -1854,9 +1969,11 @@ mod tests {
             "typeTag":"property:image-boxart"
         }"#;
         let result: MediaImageResult = serde_json::from_str(json).expect("parse");
+        assert_eq!(result.delivery, "");
         assert_eq!(result.content_type, "image/png");
         assert_eq!(result.extension.as_deref(), Some("png"));
         assert_eq!(result.data, "iVBORw0KGgo=");
+        assert!(result.local_path.is_none());
         assert_eq!(result.type_tag, "property:image-boxart");
     }
 
@@ -1891,6 +2008,55 @@ mod tests {
         );
         assert!(!object.contains_key("system"));
         assert!(!object.contains_key("path"));
+    }
+
+    #[test]
+    fn media_meta_batch_preserves_order_and_ref_shapes() {
+        let params = MediaMetaBatchParams::try_new(vec![
+            MediaMetaParams::for_media_id(42),
+            MediaMetaParams::for_media("SNES", "/roms/snes/x.sfc"),
+        ])
+        .expect("valid batch");
+        let json = serde_json::to_value(params).expect("serialise");
+        let items = json["items"].as_array().expect("items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], serde_json::json!({"mediaId": 42}));
+        assert_eq!(
+            items[1],
+            serde_json::json!({"system": "SNES", "path": "/roms/snes/x.sfc"})
+        );
+    }
+
+    #[test]
+    fn media_meta_batch_enforces_item_cap() {
+        let max_items = vec![MediaMetaParams::for_media_id(1); MEDIA_META_BATCH_MAX_ITEMS];
+        assert!(MediaMetaBatchParams::try_new(max_items).is_ok());
+        let over_limit = vec![MediaMetaParams::for_media_id(1); MEDIA_META_BATCH_MAX_ITEMS + 1];
+        assert_eq!(
+            MediaMetaBatchParams::try_new(over_limit).expect_err("over limit"),
+            format!("media.meta batch cannot contain more than {MEDIA_META_BATCH_MAX_ITEMS} items")
+        );
+        assert!(MediaMetaBatchParams::try_new(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn media_meta_batch_result_parses_mixed_items() {
+        let json = r#"{"items":[
+            {"media":{"path":"/a","title":{}}},
+            {"error":"media not found"}
+        ]}"#;
+        let result: MediaMetaBatchResult = serde_json::from_str(json).expect("parse");
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(
+            result.items[0]
+                .media
+                .as_ref()
+                .map(|media| media.path.as_str()),
+            Some("/a")
+        );
+        assert!(result.items[0].error.is_none());
+        assert!(result.items[1].media.is_none());
+        assert_eq!(result.items[1].error.as_deref(), Some("media not found"));
     }
 
     #[test]
@@ -2483,6 +2649,37 @@ mod tests {
         let result: MediaMetaResult = serde_json::from_str(json).expect("parse");
         assert!(result.media.properties.is_empty());
         assert!(result.media.title.properties.is_empty());
+    }
+
+    #[test]
+    fn search_and_history_cover_defaults_are_backward_compatible() {
+        let item: MediaItem =
+            serde_json::from_str(r#"{"name":"Zelda","path":"/p"}"#).expect("search item");
+        let history: MediaHistoryEntry =
+            serde_json::from_str(r#"{"mediaPath":"/p"}"#).expect("history entry");
+        assert!(item.has_cover);
+        assert!(history.has_cover);
+        assert!(MediaItem::default().has_cover);
+        assert!(MediaHistoryEntry::default().has_cover);
+
+        let item: MediaItem =
+            serde_json::from_str(r#"{"name":"Zelda","path":"/p","hasCover":false}"#)
+                .expect("search item");
+        let history: MediaHistoryEntry =
+            serde_json::from_str(r#"{"mediaPath":"/p","hasCover":false}"#).expect("history entry");
+        assert!(!item.has_cover);
+        assert!(!history.has_cover);
+    }
+
+    #[test]
+    fn media_image_result_parses_local_path_delivery() {
+        let result: MediaImageResult = serde_json::from_str(
+            r#"{"delivery":"localPath","contentType":"image/webp","extension":"webp","localPath":"/tmp/cover.webp","typeTag":"property:image-boxart"}"#,
+        )
+        .expect("parse");
+        assert_eq!(result.delivery, MEDIA_IMAGE_DELIVERY_LOCAL_PATH);
+        assert_eq!(result.local_path.as_deref(), Some("/tmp/cover.webp"));
+        assert!(result.data.is_empty());
     }
 
     #[test]

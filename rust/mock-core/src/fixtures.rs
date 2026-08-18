@@ -278,6 +278,7 @@ pub fn media_browse_response(params: &Value) -> Value {
                 "relativePath": file,
                 "tags": tags_for(file, index),
                 "disambiguatingTags": disambiguating_tags_for(file),
+                "hasCover": true,
             });
             filters
                 .iter()
@@ -311,6 +312,64 @@ pub fn media_browse_response(params: &Value) -> Value {
         "totalDirs": 0,
         "pagination": pagination,
     })
+}
+
+pub fn media_meta_response(params: &Value) -> Value {
+    fn media_for(reference: &Value) -> Value {
+        let media_id = reference.get("mediaId").and_then(Value::as_i64);
+        let system = reference
+            .get("system")
+            .and_then(Value::as_str)
+            .unwrap_or("Mock");
+        let path = reference.get("path").and_then(Value::as_str).map_or_else(
+            || format!("/mock/media/{}", media_id.unwrap_or_default()),
+            str::to_string,
+        );
+        let name = path
+            .rsplit('/')
+            .next()
+            .unwrap_or("Mock Game")
+            .split('.')
+            .next()
+            .unwrap_or("Mock Game")
+            .to_string();
+        json!({
+            "path": path,
+            "parentDir": "/mock",
+            "isMissing": false,
+            "tags": [{"type": "region", "tag": "world"}],
+            "properties": {},
+            "availableImageTypes": [],
+            "title": {
+                "slug": name.to_lowercase(),
+                "name": name,
+                "slugLength": name.len(),
+                "slugWordCount": name.split_whitespace().count(),
+                "system": {"id": system, "name": system_display_for(system)},
+                "tags": [
+                    {"type": "year", "tag": "1994"},
+                    {"type": "developer", "tag": "Mock Studio"}
+                ],
+                "properties": {
+                    "property:description": {
+                        "text": format!("Mock metadata for {name}."),
+                        "contentType": ""
+                    }
+                },
+                "availableImageTypes": []
+            }
+        })
+    }
+
+    if let Some(items) = params.get("items").and_then(Value::as_array) {
+        return json!({
+            "items": items
+                .iter()
+                .map(|item| json!({"media": media_for(item)}))
+                .collect::<Vec<_>>()
+        });
+    }
+    json!({"media": media_for(params)})
 }
 
 pub fn media_browse_index_response(params: &Value) -> Value {
@@ -375,16 +434,35 @@ pub fn media_history_response(params: &Value) -> Value {
         .and_then(Value::as_u64)
         .unwrap_or(25)
         .min(100) as usize;
+    let offset = params
+        .get("cursor")
+        .and_then(Value::as_str)
+        .and_then(|cursor| cursor.parse::<usize>().ok())
+        .unwrap_or(0);
+    let distinct_media = params
+        .get("distinctMedia")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
-    // Synthesize a history list from the first ten games in `ALL_GAMES`,
-    // newest first. Real Core sorts by `endedAt` descending; the mock
-    // just walks the array and stamps backward-counting timestamps so
-    // the order is stable across runs.
-    let entries: Vec<Value> = ALL_GAMES
+    // Synthesize newest-first play sessions. Non-distinct history repeats the
+    // newest game once so tests can prove `distinctMedia` changes semantics;
+    // distinct history exposes one row per `(systemId, mediaPath)` before the
+    // cursor is applied, matching Core's pagination contract.
+    let mut sessions: Vec<_> = ALL_GAMES
         .iter()
         .filter(|(_, _, system)| systems.is_empty() || systems.contains(system))
-        .take(limit)
+        .collect();
+    if !distinct_media {
+        if let Some(newest) = sessions.first().copied() {
+            sessions.insert(1, newest);
+        }
+    }
+    let total = sessions.len();
+    let entries: Vec<Value> = sessions
+        .into_iter()
         .enumerate()
+        .skip(offset)
+        .take(limit)
         .map(|(i, (name, file, system))| {
             let started = format!("2026-04-29T{:02}:00:00Z", 23 - i.min(23));
             let ended = format!("2026-04-29T{:02}:30:00Z", 23 - i.min(23));
@@ -394,6 +472,7 @@ pub fn media_history_response(params: &Value) -> Value {
                 "mediaName": name,
                 "mediaPath": format!("/mock/{system}/{file}"),
                 "launcherId": system,
+                "hasCover": true,
                 "startedAt": started,
                 "endedAt": ended,
                 "playTime": 1800,
@@ -404,12 +483,17 @@ pub fn media_history_response(params: &Value) -> Value {
     // returned; mirror that so the frontend's MediaHistoryResult
     // deserialiser hits the same edges in mock as on real Core.
     let has_entries = !entries.is_empty();
+    let next_offset = offset.saturating_add(entries.len());
     let mut response = json!({ "entries": entries });
     if has_entries {
+        let has_next_page = next_offset < total;
         response["pagination"] = json!({
-            "hasNextPage": false,
+            "hasNextPage": has_next_page,
             "pageSize": limit,
         });
+        if has_next_page {
+            response["pagination"]["nextCursor"] = json!(next_offset.to_string());
+        }
     }
     response
 }
@@ -449,6 +533,7 @@ fn games_for_systems<'a>(systems: &'a [&'a str]) -> impl Iterator<Item = Value> 
                 "system": { "id": system, "name": system_name, "category": category },
                 "tags": tags_for(file, index),
                 "disambiguatingTags": disambiguating_tags_for(file),
+                "hasCover": true,
             }))
         })
 }
